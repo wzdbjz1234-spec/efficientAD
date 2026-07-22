@@ -1,0 +1,84 @@
+# EfficientAD Glossary
+
+Terms used in the EfficientAD codebase and lessons.
+
+## Core Concepts
+
+**Convolution (卷积)**:
+A sliding-window operation that applies a small filter (kernel) over an image to produce a feature map. Each position in the output captures whether a specific visual pattern (edge, texture, color transition) appears at that location.
+
+**Feature Map (特征图)**:
+The output tensor from a convolution layer, with shape (batch, channels, height, width). Each channel detects a different visual pattern across the spatial grid.
+
+**Receptive Field (感受野)**:
+The region of the input image that influences a single value in a feature map. Early layers see small patches (edges); deep layers see large contexts (shapes, object parts).
+
+**Channel (通道)**:
+One slice of a feature map. In EfficientAD: input has 3 channels (RGB), intermediate layers have 128–512 channels, teacher outputs 384 channels. More channels = more distinct features detected in parallel.
+
+**Kernel / Filter (卷积核)**:
+The small weight matrix (e.g., 3×3, 4×4) that slides over the input during convolution. The learned values in these kernels determine what visual pattern each channel responds to.
+
+**Stride (步长)**:
+How many pixels the convolution kernel moves each step. Stride 1 = overlap, stride 2 = downsample by 2x.
+
+**Padding (填充)**:
+Extra pixels added around the input borders so the output spatial size is controlled. `padding=1` with a 4×4 kernel gives "same" output size when stride=1.
+
+**AvgPool (平均池化)**:
+Replaces each small N×N grid in a feature map with its average value. EfficientAD uses `AvgPool2d(2, 2)` to halve spatial dimensions after certain conv layers — this builds a hierarchical representation.
+
+**Batch Normalization (批归一化, implicit)**:
+Not explicitly visible in the code, but the pretrained Wide ResNet backbone was trained with BN. It normalizes activations within a mini-batch to stabilize training. EfficientAD's student does not use BN directly — the teacher's learned statistics serve a similar role.
+
+## EfficientAD-Specific
+
+**Teacher-Student Architecture (师生架构)**:
+The core design pattern of EfficientAD. A frozen pretrained teacher network extracts features from normal images. A student network is trained to predict the teacher's output. On anomalous images, the student's prediction diverges from the teacher's output — that divergence is the anomaly signal.
+
+**Knowledge Distillation (知识蒸馏)**:
+The training paradigm where a smaller "student" model learns to mimic the output of a larger frozen "teacher" model. Not classification distillation — it's feature-map-level distillation: the student learns to reconstruct the teacher's intermediate feature representations.
+
+**Teacher Normalization (teacher_mean / teacher_std)**:
+Mean and standard deviation of the teacher's feature maps across all training images (computed at `efficientad.py:342-366`). Used to whiten the teacher output so the student learns to predict zero-mean, unit-variance features rather than raw values.
+
+**Map Normalization (map_normalization)**:
+Computing 90th and 99.5th percentile values of anomaly maps on validation data (`efficientad.py:319-339`). These quantiles scale raw anomaly scores to a [0, 0.1] range for consistent thresholding.
+
+**Hard Feature Loss (loss_hard)**:
+The MSE loss computed only on the top 0.1% of feature differences (at `efficientad.py:179-180`). This focuses training on the hardest-to-reconstruct features, preventing the student from averaging out fine details.
+
+**Penalty Loss (loss_penalty)**:
+A regularization term that pushes the student's output toward zero when fed random ImageNet images (`efficientad.py:183-184`). This prevents the student from outputting spurious feature predictions on inputs that don't resemble the training distribution.
+
+**PDN (Patch Description Network)**:
+The building block for both teacher and student backbones, defined in `common.py:64-101`. A compact CNN without downsampling beyond avg-pool, designed to produce 384-channel feature maps. Comes in small (4 convs) and medium (6 convs) variants.
+
+**Autoencoder (自编码器)**:
+A separate network (`common.py:6-62`) trained alongside the student. It compresses an augmented version of the input image through a bottleneck and reconstructs the teacher's features. Its output is compared against the student's output as an additional anomaly signal channel.
+
+**Anomaly Map (异常图)**:
+The final 2D output of inference (`efficientad.py:299-316`), same spatial size as the input image. Each pixel's value indicates how anomalous that location is — computed as `0.5 × map_st + 0.5 × map_ae`.
+
+**out_channels**:
+384. The number of feature channels output by teacher and student, used throughout the codebase. This number comes from EfficientNet/PDN architecture and is treated as a constant.
+
+## Training Concepts
+
+**Epoch / Iteration**:
+EfficientAD uses iterations, not epochs. Training runs for `train_steps` (default 70,000) iterations, each processing one image. The `InfiniteDataloader` (`common.py:114-120`) cycles the dataset indefinitely.
+
+**Learning Rate Schedule (StepLR)**:
+The optimizer's learning rate is multiplied by 0.1 at 95% of training (`efficientad.py:164-165`). This is a step decay: high LR for most of training (fast exploration), low LR at the end (fine-tuning).
+
+**Adam Optimizer**:
+Adaptive gradient-based optimization algorithm that maintains per-parameter learning rates. Used with `lr=1e-4` and `weight_decay=1e-5` (L2 regularization, `efficientad.py:161-163`).
+
+**ImageNet**:
+A dataset of 1.2 million labeled natural images (dogs, cars, etc.). EfficientAD uses it in two ways: (1) the teacher is a Wide ResNet-101 pretrained on ImageNet, providing general-purpose visual features; (2) random ImageNet images are used as the "penalty" during student training.
+
+**MVTec AD**:
+A benchmark dataset for industrial anomaly detection with 15 product categories (bottle, cable, capsule, etc.). Each has normal training images and test images with various defects. EfficientAD follows MVTec AD's directory structure convention.
+
+**AUC (Area Under ROC Curve)**:
+The evaluation metric (`efficientad.py:296`). Measures how well the model separates normal from anomalous images by sweeping a threshold over anomaly scores. 100% = perfect, 50% = random.

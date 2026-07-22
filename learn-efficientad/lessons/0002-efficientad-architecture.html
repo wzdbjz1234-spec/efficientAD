@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0002: EfficientAD 架构 — 师生网络与异常检测</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>0002: EfficientAD 架构 — 师生网络与异常检测</h1>
+
+<p>这一课的目标：<strong>能画出 EfficientAD 的结构图，解释它为什么能检测异常，以及看懂 <code>efficientad.py</code> 的核心训练循环。</strong></p>
+
+<h2>1. 核心思想：如果你只会做"正常"的事……</h2>
+
+<p>考虑一个人，从小到大只见过完好的瓶子。你给他看任何一张瓶子图片，他都能精确预测"一个完好瓶子应该是什么样"。</p>
+
+<p>现在给他看一个 <em>有裂纹的瓶子</em>。他仍然输出"完好瓶子的样子" — 但你对比他的输出和真实图片，就发现差异很大。<strong>这个差异就是异常信号</strong>。</p>
+
+<p>EfficientAD 的三个角色就是围绕这个思想构建的：</p>
+
+<table>
+<tr><th>角色</th><th>你代码里的对象</th><th>它做什么</th></tr>
+<tr><td><strong>Teacher</strong></td><td><code>get_pdn_small(384)</code></td><td>冷冻的"专家" — 被预训练在 ImageNet 上学会了一般的视觉知识。训练时不更新。</td></tr>
+<tr><td><strong>Student</strong></td><td><code>get_pdn_small(768)</code></td><td>"学徒" — 训练目标是模仿 Teacher 的输出。只在正常图上训练。</td></tr>
+<tr><td><strong>Autoencoder</strong></td><td><code>get_autoencoder(384)</code></td><td>"压缩器" — 把增广后的输入压缩再还原，也去模仿 Teacher 的输出。</td></tr>
+</table>
+
+<h2>2. 完整数据流（训练时）</h2>
+
+<div class="diagram">
+                        ┌───────────────────┐
+   input (256×256) ─────┤     Teacher       ├──→ teacher_output [1, 384, 61, 61]
+   (正常瓶子)           │   (frozen, 384ch)  │
+                        └───────────────────┘
+                                  │
+                                  │  teacher_mean / teacher_std
+                                  ▼  （归一化到 0 均值 1 方差）
+                        ┌───── teacher_output_norm ─────┐
+                        │                                │
+                        ▼                                ▼
+               ┌───────────────┐              ┌──────────────────┐
+               │    Student    │              │   Autoencoder    │
+               │ (trainable,   │              │  (trainable,     │
+               │   768ch)      │              │   384ch)         │
+               └───────┬───────┘              └────────┬─────────┘
+                       │                               │
+          student_out[:,:384]                         ae_out
+          student_out[:,384:]                         
+                       │                               │
+                       ▼                               ▼
+             ┌─────────────────┐             ┌─────────────────┐
+             │ loss_hard (MSE) │             │ loss_ae  (MSE)  │
+             │ loss_penalty    │             │ loss_stae (MSE) │
+             └────────┬────────┘             └────────┬────────┘
+                      │                               │
+                      └───────────┬───────────────────┘
+                                  ▼
+                          loss_total = loss_st + loss_ae + loss_stae
+</div>
+
+<div class="callout callout-warn">
+<strong>为什么会检测异常</strong>：Student 只在 <em>正常</em> 图上训练过"模仿 Teacher"。看到异常图时，它不知道怎么模仿，输出就会偏离 Teacher。这个偏离量 → anomaly map → 高分数区域 = 缺陷位置。
+</div>
+
+<h2>3. 代码追踪：训练循环</h2>
+
+<p>打开 <code>efficientad.py</code>，从 line 167 开始看 — 这是核心训练循环的一轮迭代：</p>
+
+<h3>Step 1: 获取数据 (line 168-173)</h3>
+
+<pre><code>for iteration, (image_st, image_ae), image_penalty in zip(
+        tqdm_obj, train_loader_infinite, penalty_loader_infinite):
+    if on_gpu:
+        image_st = image_st.cuda()      # 原图 → GPU
+        image_ae = image_ae.cuda()      # 增广图（ColorJitter 后的）→ GPU
+        if image_penalty is not None:
+            image_penalty = image_penalty.cuda()  # ImageNet 随机图 → GPU
+</code></pre>
+
+<p><code>train_transform</code> (line 60-61) 对每张图产出两个版本：</p>
+
+<pre><code>def train_transform(image):
+    return default_transform(image), default_transform(transform_ae(image))
+    #                                ↑                             ↑
+    #                           image_st                     image_ae
+    #                        (原图Normalize)            (经过ColorJitter再Normalize)
+</code></pre>
+
+<h3>Step 2: Teacher 提取特征 (line 174-176)</h3>
+
+<pre><code>with torch.no_grad():                         # Teacher 不参与梯度
+    teacher_output_st = teacher(image_st)     # [1, 384, 61, 61] — 384 张特征图
+    teacher_output_st = (teacher_output_st - teacher_mean) / teacher_std
+    #                      ↑ 归一化：减均值除标准差
+</code></pre>
+
+<p><code>teacher_mean</code> 和 <code>teacher_std</code> 是在训练开始时算好的（<code>teacher_normalization</code>, line 342-366）— 在所有训练图上跑一遍 Teacher，取平均值和标准差。这就是"用数据校准 Teacher 的刻度"。</p>
+
+<h3>Step 3: Student 尝试模仿 (line 177-180)</h3>
+
+<pre><code>student_output_st = student(image_st)[:, :out_channels]  # 只取前 384 个通道！
+distance_st = (teacher_output_st - student_output_st) ** 2  # 每个像素差值的平方
+d_hard = torch.quantile(distance_st, q=0.999)              # 取 99.9% 分位数
+loss_hard = torch.mean(distance_st[distance_st >= d_hard])  # 只惩罚最难的那 0.1%
+</code></pre>
+
+<div class="callout callout-tip">
+<strong>为什么 Student 有 768 个通道？</strong> 前 384 个通道对应 <code>image_st</code> 的预测，后 384 个对应 <code>image_ae</code> 的预测。<strong>前一半</strong> 在这步和 Teacher 对比。<strong>后一半</strong> 在后面和 Autoencoder 对比。
+</div>
+
+<h3>Step 4: Penalty（可选，line 182-187）</h3>
+
+<pre><code>if image_penalty is not None:
+    student_output_penalty = student(image_penalty)[:, :out_channels]
+    loss_penalty = torch.mean(student_output_penalty**2)  # 迫使输出接近 0！
+    loss_st = loss_hard + loss_penalty
+else:
+    loss_st = loss_hard
+</code></pre>
+
+<p><strong>Penalty 的作用</strong>：给 Student 看随机 ImageNet 图片（猫、车、山水……），要求它对"非目标物体"输出的特征尽可能接近 0。这和"只在正常图上训"互补 — 两面包夹，让 Student 只对"你的产品"有反应。</p>
+
+<h3>Step 5: Autoencoder 路径 (line 189-197)</h3>
+
+<pre><code>ae_output = autoencoder(image_ae)                          # AE 重建 增广图
+teacher_output_ae = teacher(image_ae)                      # Teacher 看 增广图
+teacher_output_ae = (teacher_output_ae - teacher_mean) / teacher_std
+student_output_ae = student(image_ae)[:, out_channels:]    # Student 后 384 通道
+
+distance_ae = (teacher_output_ae - ae_output)**2           # AE vs Teacher
+distance_stae = (ae_output - student_output_ae)**2         # Student vs AE
+loss_ae = torch.mean(distance_ae)
+loss_stae = torch.mean(distance_stae)
+</code></pre>
+
+<p><code>loss_ae</code> 和 <code>loss_stae</code> 是两个额外的约束，都作用在 <strong>增广后的图像</strong> 上。它们确保：</p>
+
+<ol>
+  <li>Autoencoder 的输出接近 Teacher（<code>loss_ae</code>）</li>
+  <li>但 Student 的输出也要接近 Autoencoder（<code>loss_stae</code>），形成三角约束</li>
+</ol>
+
+<h3>Step 6: 总损失 (line 198)</h3>
+
+<pre><code>loss_total = loss_st + loss_ae + loss_stae
+optimizer.zero_grad()
+loss_total.backward()
+optimizer.step()
+</code></pre>
+
+<h2>4. 推理时：异常图怎么产生</h2>
+
+<p><code>predict()</code> 函数（line 299-316）比训练简单得多 — 不需要 loss，直接算差值：</p>
+
+<pre><code>def predict(image, teacher, student, autoencoder, ...):
+    teacher_output = teacher(image)                                   # Teacher 看原图
+    teacher_output = (teacher_output - teacher_mean) / teacher_std    # 归一化
+    student_output = student(image)                                   # Student 看原图
+    autoencoder_output = autoencoder(image)                           # AE 看原图
+
+    # map_st: Student 前 384ch vs Teacher → 逐像素差的平方
+    map_st = torch.mean((teacher_output - student_output[:,:384])**2, dim=1)
+
+    # map_ae: Student 后 384ch vs AE → 逐像素差的平方
+    map_ae = torch.mean((autoencoder_output - student_output[:,384:])**2, dim=1)
+
+    # 缩放 + 融合
+    map_st = 0.1 * (map_st - q_st_start) / (q_st_end - q_st_start)
+    map_ae = 0.1 * (map_ae - q_ae_start) / (q_ae_end - q_ae_start)
+    map_combined = 0.5 * map_st + 0.5 * map_ae
+
+    return map_combined, map_st, map_ae
+</code></pre>
+
+<div class="callout callout-tip">
+<strong>为什么异常图上缺陷位置会"亮"</strong>：正常区域的纹理和训练数据一样，Student 能很好地模仿 Teacher → 差值小。缺陷区域的纹理没见过 → Student 不知所措，输出和 Teacher 差距大 → 差值大 → map 上那个位置得分高。
+</div>
+
+<h2>5. 完整流程总结</h2>
+
+<pre><code>
+训练阶段                          推理阶段
+────────                          ────────
+正常图片 → Teacher → 特征        任意图片 → Teacher → 特征
+正常图片 → Student → 模仿特征     任意图片 → Student → 预测
+        → 算 loss → 更新 Student          → 算差值 → 异常图
+                                         ↓
+正常图片(增广) → Autoencoder            正常位置: 差值小 → 低分
+        → 算 loss → 更新 AE            异常位置: 差值大 → 高分
+</code></pre>
+
+<h2>6. 你的代码里对应哪里</h2>
+
+<table>
+<tr><th>你想知道的</th><th>代码位置</th></tr>
+<tr><td>Teacher 是什么</td><td><code>efficientad.py:137-139</code></td></tr>
+<tr><td>Student 为什么有 768 通道</td><td><code>efficientad.py:139-140</code></td></tr>
+<tr><td>Autoencoder 是什么</td><td><code>efficientad.py:147</code></td></tr>
+<tr><td>Teacher 怎么归一化</td><td><code>efficientad.py:342-366</code></td></tr>
+<tr><td>loss_hard 怎么算</td><td><code>efficientad.py:178-180</code></td></tr>
+<tr><td>loss_penalty 怎么算</td><td><code>efficientad.py:182-187</code></td></tr>
+<tr><td>推理怎么跑</td><td><code>efficientad.py:299-316</code></td></tr>
+<tr><td>我的 <code>inference.py</code> 做了什么</td><td><code>inference.py:85-108</code></td></tr>
+</table>
+
+<h2>7. 检索练习</h2>
+
+<div class="quiz">
+<h3>Quiz: EfficientAD 设计</h3>
+
+<details>
+<summary>1. 为什么 Teacher 在训练时设置为 <code>.eval()</code> 且不更新？</summary>
+<p>因为 Teacher 的作用是提供"正确参考标准"。如果用反向传播更新 Teacher，它会逐渐适应正常图片 — 即也对异常图片失去辨别力。冻结 Teacher 就是固定基线。</p>
+</details>
+
+<details>
+<summary>2. 如果去掉 loss_penalty（不喂 ImageNet 图），会发生什么？</summary>
+<p>Student 可能对任何输入都输出"看起来像正常品的特征"，包括完全无关的物体（比如拍一张桌子）。Penalty 强制 Student 学会"不是我认识的东西就输出 0"，减少误报。</p>
+</details>
+
+<details>
+<summary>3. 为什么 loss_hard 只取 top 0.1% 而不是所有像素的误差？</summary>
+<p>因为正常产品的大部分区域（平滑表面、背景）很容易模仿 — 如果平均所有像素，模型就学会了"忽略细节区别"。Hard loss 迫使模型关注最难模仿的精细纹理部分，提升对细微缺陷的敏感度。</p>
+</details>
+
+<details>
+<summary>4. Autoencoder 和 Student 都试图模仿 Teacher，它们有什么区别？</summary>
+<p>Student 直接从图像预测特征（快，低延迟）。Autoencoder 先压缩再重建（慢，但抗过拟合）。它们产生两个异常图 (map_st, map_ae)，0.5:0.5 融合 — 双重校验比单一路径更可靠。</p>
+</details>
+</div>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://arxiv.org/abs/2303.14535" target="_blank">EfficientAD 原论文 (WACV 2024)</a> — 深入理解每个设计选择的消融实验</li>
+  <li><a href="0001-cnn-basics.html">上一课: CNN 基础 →</a></li>
+  <li><a href="../reference/glossary.html">本课程 Glossary</a> — 所有术语速查</li>
+</ul>
+
+<div class="footer-nav">
+  <a href="0001-cnn-basics.html">← 上一课: CNN 基础</a>
+  <span></span>
+</div>
+
+<footer>
+  <p>有问题？随时问 agent — 它就是你的助教。</p>
+</footer>
+
+</body>
+</html>

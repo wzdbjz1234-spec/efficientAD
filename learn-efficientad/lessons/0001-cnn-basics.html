@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lesson 0001: CNN 基础 — 从图片到特征图</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+
+<h1>0001: CNN 基础 — 从图片到特征图</h1>
+
+<p>这一课的目标是：<strong>能看懂 <code>common.py</code> 里的 <code>nn.Sequential</code> 定义，知道每一行在做什么</strong>。不需要数学公式，需要的是直觉。</p>
+
+<h2>1. 为什么需要 CNN</h2>
+
+<p>一张 256×256 的彩色图片有 <strong>256 × 256 × 3 = 196,608</strong> 个数字（像素值）。如果用全连接网络，第一个隐藏层每个神经元就要 19 万个权重 — 参数量爆炸，而且完全忽略了"像素之间的距离关系"。</p>
+
+<p>CNN 的解决思路：<strong>不看整张图，只看一个小窗口</strong>。一个 4×4 的窗口只有 16 个像素，在这个窗口上学习一个 <strong>卷积核</strong>（kernel），然后把这个窗口从左到右、从上到下滑过整张图。</p>
+
+<h2>2. 三个核心操作</h2>
+
+<h3>2.1 卷积（Convolution）</h3>
+
+<p>打开 <code>common.py</code>，看 <code>get_pdn_small</code> 的第一行：</p>
+
+<pre><code>nn.Conv2d(in_channels=3, out_channels=128, kernel_size=4, padding=3)</code></pre>
+
+<p>参数含义：</p>
+
+<table>
+<tr><th>参数</th><th>值</th><th>含义</th></tr>
+<tr><td><code>in_channels</code></td><td>3</td><td>输入是 RGB 三通道彩色图</td></tr>
+<tr><td><code>out_channels</code></td><td>128</td><td>输出 128 个"特征图" — 相当于学了 128 种不同的 4×4 模式检测器</td></tr>
+<tr><td><code>kernel_size</code></td><td>4</td><td>每个检测器的窗口是 4×4 像素</td></tr>
+<tr><td><code>padding</code></td><td>3</td><td>在图片四周各补 3 个像素的边，保证输出尺寸和输入一样大</td></tr>
+</table>
+
+<div class="diagram">
+  输入: [1, 3, 256, 256]  (batch=1, 3通道, 256×256)
+        │
+        ▼  Conv2d(3→128, kernel=4, padding=3)
+        │
+  输出: [1, 128, 256, 256]  (batch=1, 128通道, 大小不变)
+</div>
+
+<p><strong>直观理解</strong>：输入是一张图，输出是 128 张"特征图"。第 37 张特征图可能对"水平边缘"敏感，第 89 张可能对"45°纹理"敏感。每个通道等于一个专门的检测器。</p>
+
+<h3>2.2 ReLU — 激活函数</h3>
+
+<pre><code>nn.ReLU(inplace=True)</code></pre>
+
+<p>简单到只有一行代码的事：把卷积输出中所有 <strong>负数变成 0</strong>，正数保持不变。</p>
+
+<pre><code>输入:  [ 0.8, -0.3,  2.1, -1.5,  0.0 ]
+输出:  [ 0.8,  0.0,  2.1,  0.0,  0.0 ]
+</code></pre>
+
+<p><strong>为什么需要</strong>：没有 ReLU，多层卷积叠加就等于一个大卷积（线性函数的组合还是线性函数）。ReLU 引入非线性，让网络能学习复杂的视觉模式。</p>
+
+<h3>2.3 AvgPool — 平均池化（下采样）</h3>
+
+<pre><code>nn.AvgPool2d(kernel_size=2, stride=2, padding=1)</code></pre>
+
+<p>把每 2×2 的区域用 <strong>平均值</strong> 代替，然后向右/下走 2 步。结果：<strong>图像尺寸减半</strong>。</p>
+
+<div class="diagram">
+  输入: [1, 128, 256, 256]
+        │
+        ▼  AvgPool2d(2, 2, padding=1)
+        │
+  输出: [1, 128, 128, 128]   尺寸减半！
+</div>
+
+<p><strong>为什么需要</strong>：尺寸减半后，下一层卷积的 4×4 窗口实际覆盖了原图更大的区域（感受野变大）。这就像从"看纹理细节"过渡到"看零件形状"。</p>
+
+<h2>3. 组合起来：PDN Small</h2>
+
+<p>现在来看完整的 <code>get_pdn_small</code>（<code>common.py:64-79</code>）：</p>
+
+<pre><code>nn.Sequential(
+    # Layer 1: 细节层
+    nn.Conv2d(in_channels=3, out_channels=128, kernel_size=4, padding=3),
+    nn.ReLU(inplace=True),
+    nn.AvgPool2d(kernel_size=2, stride=2, padding=1),     # 256→128
+
+    # Layer 2: 纹理层
+    nn.Conv2d(in_channels=128, out_channels=256, kernel_size=4, padding=3),
+    nn.ReLU(inplace=True),
+    nn.AvgPool2d(kernel_size=2, stride=2, padding=1),     # 128→64
+
+    # Layer 3: 部件层
+    nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, padding=1),
+    nn.ReLU(inplace=True),
+
+    # Layer 4: 输出层
+    nn.Conv2d(in_channels=256, out_channels=384, kernel_size=4),
+)</code></pre>
+
+<p>数据流的尺寸变化：</p>
+
+<div class="diagram">
+  输入图片    [1,   3, 256, 256]
+  Conv 1      [1, 128, 256, 256]
+  AvgPool 1   [1, 128, 128, 128]
+  Conv 2      [1, 256, 128, 128]
+  AvgPool 2   [1, 256,  64,  64]
+  Conv 3      [1, 256,  64,  64]
+  Conv 4      [1, 384,  61,  61]    ← 最终特征图
+</div>
+
+<p>注意最后一步：<code>kernel_size=4, padding=0</code>（没有 padding），所以尺寸从 64→61（64−4+1=61）。</p>
+
+<div class="callout callout-warn">
+<strong>关键洞察</strong>：这个网络的"深度"只有 4 层卷积 — 这就是为什么它叫 <em>小</em> PDN。中等版本有 6 层。EfficientAD 的设计哲学是"用浅层网络就能做异常检测"。
+</div>
+
+<h2>4. 再看一个：Autoencoder</h2>
+
+<p><code>get_autoencoder</code>（<code>common.py:6-62</code>），前半段类似 PDN，后半段反向放大：</p>
+
+<pre><code># 编码器（下采样）: 256 → 128 → 64 → 32 → 16 → 1
+nn.Conv2d(3→32, kernel=4, stride=2), ReLU    # 256→128
+nn.Conv2d(32→32, kernel=4, stride=2), ReLU   # 128→64
+nn.Conv2d(32→64, kernel=4, stride=2), ReLU   # 64→32
+nn.Conv2d(64→64, kernel=4, stride=2), ReLU   # 32→16
+nn.Conv2d(64→64, kernel=4, stride=2), ReLU   # 16→8
+nn.Conv2d(64→64, kernel=8)                   # 8→1  (瓶颈!)
+
+# 解码器（上采样）: 1 → 3 → 8 → 15 → 32 → 63 → 127 → 56
+nn.Upsample(size=3), Conv2d(64→64), ReLU     # 放大 + 卷积
+nn.Upsample(size=8), Conv2d(64→64), ReLU
+...
+</code></pre>
+
+<p>和 PDN 的区别：用 <code>stride=2</code> 代替 <code>AvgPool</code> 来降尺寸；用 <code>Upsample</code> 来恢复尺寸。Autoencoder 的核心思想是 <strong>先压缩再重建</strong> — 中间那个 1×1 的瓶颈层迫使网络只保留最关键的信息。</p>
+
+<div class="callout callout-tip">
+<strong>5 秒自测</strong>：不往回看，说出 <code>nn.Conv2d(3, 128, 4, padding=3)</code> 四个参数分别代表什么？
+</div>
+
+<h2>5. 检索练习</h2>
+
+<div class="quiz">
+<h3>Quiz: CNN 直觉</h3>
+<p>回答以下问题，然后点击查看答案。</p>
+
+<details>
+<summary>1. 为什么 Conv 的输出通道数（比如 128）比输入通道数（比如 3）多很多？</summary>
+<p>因为输出需要检测 <em>更多种类的视觉模式</em>。输入只有 RGB 三个通道（红、绿、蓝），但输出需要 128 个通道来检测边缘、纹理、角点、颜色梯度等 128 种不同的低级特征。通道数 = 模式种类数。</p>
+</details>
+
+<details>
+<summary>2. AvgPool(2, 2) 之后，一张 256×256 的特征图变成多大？</summary>
+<p>128×128。每个 2×2 区域合并成一个值，步长 2 意味着窗口不重叠，所以宽高各除以 2。</p>
+</details>
+
+<details>
+<summary>3. PDN Small 最后输出是 [1, 384, 61, 61]。这 384 是什么？如果有 batch_size=8，输出形状是什么？</summary>
+<p>384 是输出通道数，即 384 张特征图，每张 61×61。<br>batch_size=8 时形状是 <strong>[8, 384, 61, 61]</strong>。</p>
+</details>
+
+<details>
+<summary>4. Autoencoder 中间的 bottleneck 层输出 [1, 64, 1, 1] — 这是什么意思？</summary>
+<p>64 个数字，空间上被压缩到 1×1 像素。这 64 个数字是整个输入图像的 <strong>压缩表示</strong>（latent code），包含了图像"是什么"的最本质信息。</p>
+</details>
+</div>
+
+<h2>6. 你的代码里对应哪里</h2>
+
+<ul>
+  <li><strong>Teacher</strong>: <code>get_pdn_small(out_channels=384)</code> → <code>common.py:64</code></li>
+  <li><strong>Student</strong>: <code>get_pdn_small(2 * out_channels = 768)</code> → 为什么是 2×？见下一课</li>
+  <li><strong>Autoencoder</strong>: <code>get_autoencoder(out_channels=384)</code> → <code>common.py:6</code></li>
+  <li><strong>训练数据预处理</strong>: <code>default_transform</code> → <code>efficientad.py:49-53</code>（Resize + ToTensor + Normalize）</li>
+</ul>
+
+<h2>延伸阅读</h2>
+
+<ul>
+  <li><a href="https://poloclub.github.io/cnn-explainer/" target="_blank">CNN Explainer</a> — 互动可视化，拖动查看每一层的特征图（强烈推荐）</li>
+  <li><a href="https://www.youtube.com/watch?v=KuXjwB4LzSA" target="_blank">3Blue1Brown: But what is a convolution?</a> — 12 分钟动画，讲清楚卷积的本质</li>
+  <li><a href="../reference/glossary.html">本课程 Glossary</a> — 所有术语的快速查阅</li>
+</ul>
+
+<div class="footer-nav">
+  <span></span>
+  <a href="0002-efficientad-architecture.html">下一课: EfficientAD 架构 →</a>
+</div>
+
+<footer>
+  <p>有问题？随时问 agent — 它就是你的助教。</p>
+</footer>
+
+</body>
+</html>
