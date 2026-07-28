@@ -262,6 +262,7 @@ def main():
     )
 
     # teacher frozen
+    teacher.load_state_dict(state_dict)
     teacher.requires_grad_(False)
     teacher.eval()
     student.train()
