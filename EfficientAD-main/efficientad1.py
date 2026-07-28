@@ -59,7 +59,7 @@ default_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
-transform_ae = transforms.RandomChoice([
+transform_ae = transforms.Compose([
     transforms.ColorJitter(brightness=(0, 2.0)),
     transforms.ColorJitter(saturation=(0, 2.5)),
     transforms.ColorJitter(hue=(-0.3, 0.3))
