@@ -294,9 +294,6 @@ def main():
             image_ae = image_ae.cuda(non_blocking=True)
             if image_penalty is not None:
                 image_penalty = image_penalty.cuda(non_blocking=True)
-
-            if image_penalty is not None:
-                image_penalty = image_penalty.cuda()(non_blocking=True)
         with torch.no_grad():
             teacher_output_st = teacher(image_st)
             teacher_output_st = (teacher_output_st - teacher_mean) / (teacher_std + 1e-6)
