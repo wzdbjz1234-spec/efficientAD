@@ -252,10 +252,17 @@ def main():
         autoencoder = get_autoencoder_tiny(out_channels)
     else:
         raise Exception()
-    state_dict = torch.load(config.weights, map_location='cuda')
-    teacher.load_state_dict(state_dict)
+    device = torch.device(
+    'cuda' if torch.cuda.is_available() else 'cpu'
+    )
+
+    state_dict = torch.load(
+        config.weights,
+        map_location=device
+    )
 
     # teacher frozen
+    teacher.requires_grad_(False)
     teacher.eval()
     student.train()
     autoencoder.train()
@@ -282,13 +289,16 @@ def main():
     for iteration, (image_st, image_ae), image_penalty in zip(
             tqdm_obj, train_loader_infinite, penalty_loader_infinite):
         if on_gpu:
-            image_st = image_st.cuda()(non_blocking=True)
-            image_ae = image_ae.cuda()(non_blocking=True)
+            image_st = image_st.cuda(non_blocking=True)
+            image_ae = image_ae.cuda(non_blocking=True)
+            if image_penalty is not None:
+                image_penalty = image_penalty.cuda(non_blocking=True)
+
             if image_penalty is not None:
                 image_penalty = image_penalty.cuda()(non_blocking=True)
         with torch.no_grad():
             teacher_output_st = teacher(image_st)
-            teacher_output_st = (teacher_output_st - teacher_mean) / teacher_std
+            teacher_output_st = (teacher_output_st - teacher_mean) / (teacher_std + 1e-6)
         student_output_st = student(image_st)[:, :out_channels]
         distance_st = (teacher_output_st - student_output_st) ** 2
         distance_st_valid = distance_st
@@ -470,9 +480,9 @@ def predict(image, teacher, student, autoencoder, teacher_mean, teacher_std,
                          student_output[:, out_channels:])**2,
                         dim=1, keepdim=True)
     if q_st_start is not None:
-        map_st = 0.1 * (map_st - q_st_start) / (q_st_end - q_st_start)
+        map_st = 0.1 * (map_st - q_st_start) / (q_st_end - q_st_start + 1e-6)
     if q_ae_start is not None:
-        map_ae = 0.1 * (map_ae - q_ae_start) / (q_ae_end - q_ae_start)
+        map_ae = 0.1 * (map_ae - q_ae_start) / (q_ae_end - q_ae_start + 1e-6)
     output_mask = feature_valid_mask(valid_input_mask, map_st)
     if output_mask is not None:
         map_st = map_st * output_mask
