@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.models import Wide_ResNet101_2_Weights
 from tqdm import tqdm
-from common import (get_pdn_small, get_pdn_medium,
+from common import (get_pdn_small, get_pdn_medium, get_pdn_tiny,
                     ImageFolderWithoutTarget, InfiniteDataloader)
 
 
@@ -23,11 +23,13 @@ def get_argparse():
         epilog='Text at the bottom of help')
     parser.add_argument('-o', '--output_folder',
                         default='output/pretraining/1/')
+    parser.add_argument('-m', '--model_size', default='small',
+                        choices=['small', 'medium', 'tiny'])
+    parser.add_argument('-i', '--imagenet_path',
+                        default='./ILSVRC/Data/CLS-LOC/train')
     return parser.parse_args()
 
 # variables
-model_size = 'small'
-imagenet_train_path = './ILSVRC/Data/CLS-LOC/train'
 seed = 42
 on_gpu = torch.cuda.is_available()
 device = 'cuda' if on_gpu else 'cpu'
@@ -67,14 +69,16 @@ def main():
                                  device=device,
                                  input_shape=(3, 512, 512))
 
-    if model_size == 'small':
+    if config.model_size == 'small':
         pdn = get_pdn_small(out_channels, padding=True)
-    elif model_size == 'medium':
+    elif config.model_size == 'medium':
         pdn = get_pdn_medium(out_channels, padding=True)
+    elif config.model_size == 'tiny':
+        pdn = get_pdn_tiny(out_channels, padding=True)
     else:
         raise Exception()
 
-    train_set = ImageFolderWithoutTarget(imagenet_train_path,
+    train_set = ImageFolderWithoutTarget(config.imagenet_path,
                                          transform=train_transform)
     train_loader = DataLoader(train_set, batch_size=16, shuffle=True,
                               num_workers=7, pin_memory=True)
@@ -108,16 +112,16 @@ def main():
         if iteration % 10000 == 0:
             torch.save(pdn,
                        os.path.join(config.output_folder,
-                                    f'teacher_{model_size}_tmp.pth'))
+                                    f'teacher_{config.model_size}_tmp.pth'))
             torch.save(pdn.state_dict(),
                        os.path.join(config.output_folder,
-                                    f'teacher_{model_size}_tmp_state.pth'))
+                                    f'teacher_{config.model_size}_tmp_state.pth'))
     torch.save(pdn,
                os.path.join(config.output_folder,
-                            f'teacher_{model_size}_final.pth'))
+                            f'teacher_{config.model_size}_final.pth'))
     torch.save(pdn.state_dict(),
                os.path.join(config.output_folder,
-                            f'teacher_{model_size}_final_state.pth'))
+                            f'teacher_{config.model_size}_final_state.pth'))
 
 
 @torch.no_grad()

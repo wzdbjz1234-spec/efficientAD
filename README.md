@@ -1,233 +1,172 @@
-# EfficientAD + ORB ROI 工业缺陷检测工具链
+# EfficientAD 工业缺陷检测工具链
 
-## 目录结构
+## 环境安装
 
+```powershell
+conda create -n llm python=3.10
+conda activate llm
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install opencv-python numpy tqdm scikit-learn tifffile matplotlib pillow
 ```
+
+以下命令均在仓库根目录执行。
+
+## 文件架构
+
+```text
 efficientAD/
-├── roi_tool.py                        # ROI 模板创建 & ORB 裁剪 (独立脚本)
-├── pipeline.py                        # 完整流水线: 匹配 → 识别 → 标注
-├── templates/                         # ROI 模板存储目录
-│   └── <template_name>/
-│       ├── template.png               # 模板原图
-│       └── roi.json                   # ROI 坐标 [x, y, w, h]
-├── mydataset/                         # MVTec AD 格式数据集
-│   └── my_product/
-│       ├── train/good/                # 训练用正常样本
-│       ├── test/good/                 # 测试用正常样本
-│       └── test/broken/               # 测试用异常样本
-├── EfficientAD-main/
-│   ├── efficientad.py                 # EfficientAD 训练主程序
-│   ├── inference.py                   # EfficientAD 推理 (不含ROI匹配)
-│   ├── visualize_features.py          # Teacher/Student 特征图对比可视化
-│   ├── common.py                      # PDN/Autoencoder 模型定义
-│   ├── models/                        # 预训练 teacher 权重
-│   └── output/1/trainings/            # 训练输出
-│       └── mvtec_ad/my_product/
+├── EfficientAD-main/             # EfficientAD 源码及训练输出
+│   └── output/<run_id>/
+│       └── trainings/mvtec_ad/<product>/
 │           ├── teacher_final.pth
 │           ├── student_final.pth
 │           ├── autoencoder_final.pth
-│           └── norm_params.json       # 归一化参数缓存
-└── learn-efficientad/                 # 学习教程工作区
+│           └── norm_params.json
+├── efficientad_tools/            # 推理、可视化、评测模块
+├── model_tools.py                # 统一命令行入口（inspect / infer / visualize / evaluate）
+├── pipeline.py                   # ORB ROI 匹配 + 推理流水线
+├── roi_tool.py                   # ORB ROI 模板创建和裁剪
+├── fixed_roi_crop.py             # 固定 ROI 裁剪与掩膜（固定机位场景）
+├── roi_mask.py                   # ROI 掩膜公共函数
+├── templates/                    # ORB ROI 模板
+└── mydataset/<product>/          # MVTec AD 格式数据集
+    ├── train/good/
+    └── test/
+        ├── good/
+        └── <缺陷类型>/
 ```
 
-## 依赖安装
+`--model` 可以是 output 编号（如 `12`），也可以直接是包含 `*_final.pth` 的目录路径。
 
-```bash
-conda create -n llm python=3.10
-conda activate llm
+## 统一模型工具 (model_tools.py)
 
-# 核心依赖
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install opencv-python numpy tqdm scikit-learn tifffile matplotlib pillow
+### 检查模型
 
-# 可视化依赖 (仅 visualize_features.py 需要)
-pip install matplotlib
+```powershell
+python model_tools.py inspect --model 12
+python model_tools.py inspect --model 12 --product my_product
 ```
 
----
+### 推理
 
-## 1. ROI 模板管理 (`roi_tool.py`)
+输入图需为已裁剪好的 ROI 图片。
 
-基于 ORB 特征匹配的 ROI 自动定位与裁剪工具。
+```powershell
+# 单图
+python model_tools.py infer --model 12 --input mydataset\my_product\test\broken\K8_0001.png --threshold 0.15
 
-### 创建模板
+# 批量（输出热力图 + scores.csv）
+python model_tools.py infer --model 12 --input mydataset\my_product\test\broken --output-dir results\model_12\broken --threshold 0.15
 
-打开一张产品图，用鼠标框选 ROI，保存为模板：
+# 使用 CPU
+python model_tools.py infer --model 12 --input path\to\image.png --device cpu
 
-```bash
-python roi_tool.py create my_product "path/to/template.jpg"
+# 旧命令兼容入口
+python batch_infer.py --model 12 --input-dir path\to\images --output-dir results
 ```
 
-操作：鼠标拖拽框选区域 → 按 **Enter** 确认 / 按 **C** 取消。
+### 特征可视化
 
-### 列出所有模板
+```powershell
+# 单图
+python model_tools.py visualize --model 12 --input mydataset\my_product\test\broken\K8_0001.png --output-dir vis\model_12 --top-k 8
 
-```bash
+# 批量（限制前 N 张）
+python model_tools.py visualize --model 12 --input mydataset\my_product\test\broken --output-dir vis\model_12 --limit 5
+```
+
+### 评测
+
+计算 AUROC、Youden 最优阈值、Accuracy、Precision、Recall、F1、混淆矩阵。误判图片自动生成诊断图。
+
+```powershell
+python model_tools.py evaluate --model 12 --data-dir mydataset\my_product --threshold 0.15 --output evaluation_model_12.json
+
+# 自定义诊断图输出目录
+python model_tools.py evaluate --model 12 --data-dir mydataset\my_product --threshold 0.15 --misclassified-dir results\errors --misclassified-top-k 8 --output eval.json
+
+# 只计算指标，不生成诊断图
+python model_tools.py evaluate --model 12 --data-dir mydataset\my_product --no-misclassified-visuals --output eval.json
+```
+
+## 固定 ROI 裁剪 (fixed_roi_crop.py)
+
+适用于固定机位、所有原图位置一致的场景，不需要 ORB 特征匹配。
+
+### 首次使用：GUI 框选 ROI 和掩膜，保存配置
+
+```powershell
+python fixed_roi_crop.py --reference path\to\ref.png --input-dir raw_images --output-dir mydataset\my_product\train\good --recursive --overwrite --save-roi roi_config.json
+```
+
+依次弹出两个框选窗口：① 拖拽框选 ROI（Enter/Space 确认）；② 在裁剪后的 ROI 中框选掩膜区域（Enter/Space 确认，C/Esc 跳过）。
+
+### 后续使用：加载配置，批量处理
+
+```powershell
+# 训练集
+python fixed_roi_crop.py --reference path\to\ref.png --input-dir raw_train --output-dir mydataset\my_product\train\good --load-roi roi_config.json --recursive --overwrite
+
+# 测试集 good
+python fixed_roi_crop.py --reference path\to\ref.png --input-dir raw_test_good --output-dir mydataset\my_product\test\good --load-roi roi_config.json --recursive --overwrite
+
+# 测试集缺陷（保持子文件夹结构）
+python fixed_roi_crop.py --reference path\to\ref.png --input-dir raw_test_defects --output-dir mydataset\my_product\test --load-roi roi_config.json --recursive --overwrite
+```
+
+### 无 GUI：命令行直接指定坐标
+
+```powershell
+python fixed_roi_crop.py --reference path\to\ref.png --input-dir raw_images --output-dir cropped --roi 100,50,400,300 --mask 20,10,80,60 --recursive
+```
+
+## ORB ROI 工具 (roi_tool.py)
+
+适用于原图位置有偏移、需要 ORB 特征匹配对齐的场景。
+
+```powershell
+# 创建模板（GUI 框选 ROI 和掩膜）
+python roi_tool.py create my_product path\to\template.jpg
+
+# 列出所有模板
 python roi_tool.py list
+
+# 单图裁剪
+python roi_tool.py crop my_product path\to\input.jpg -o cropped.png
+
+# 批量裁剪
+python roi_tool.py batch my_product raw_images cropped
 ```
 
-### 单张裁剪 (基于模板自动定位+透视矫正)
+模板保存在 `templates\my_product\`（template.png + roi.json）。
 
-```bash
-python roi_tool.py crop my_product "path/to/input.jpg"
-# 输出: input_cropped.png
+## ROI + 推理流水线 (pipeline.py)
 
-# 指定输出路径
-python roi_tool.py crop my_product "path/to/input.jpg" -o output.png
+整合 ORB ROI 裁剪和模型推理。
+
+```powershell
+# 单图
+python pipeline.py --template my_product --model 12 --image path\to\raw.png --output result.png --threshold 0.15
+
+# 批量
+python pipeline.py --template my_product --model 12 --input-dir raw_images --output-dir results --threshold 0.15
 ```
 
-### 批量裁剪整个目录
+## 训练
 
-```bash
-python roi_tool.py batch my_product ./raw_images/ ./cropped/
-```
+数据按 MVTec AD 格式组织后，在 `EfficientAD-main` 下执行：
 
-**匹配原理**: ORB 特征点检测 → BFMatcher + ratio test (0.75) → RANSAC 单应性 → 透视矫正裁剪。输入图和模板可以有旋转变换，比传统模板匹配更鲁棒。
-
----
-
-## 2. EfficientAD 训练 (`efficientad.py`)
-
-### 数据集准备
-
-按 MVTec AD 格式组织数据（`train/good/` 放正常样本, `test/good/` + `test/<缺陷名>/` 放测试样本）。
-
-### 开始训练
-
-```bash
+```powershell
 cd EfficientAD-main
-python efficientad.py -d mvtec_ad -s my_product -a ../mydataset
+python efficientad1.py -d mvtec_ad -s my_product -a ..\mydataset -o output\13 --mask-config ..\roi_config.json
 ```
 
-| 参数 | 含义 | 默认值 |
-|------|------|--------|
-| `-d` | 数据集类型 | mvtec_ad |
-| `-s` | 产品名 (子目录名) | bottle |
-| `-a` | 数据集根目录 | ./mvtec_anomaly_detection |
-| `-o` | 输出目录 | output/1 |
-| `-m` | 模型大小 | small (可选 medium) |
-| `-t` | 训练步数 | 70000 |
-| `-w` | teacher 预训练权重 | models/teacher_small.pth |
-| `-i` | ImageNet 路径 (可选) | none (跳过 penalty) |
+`--mask-config` 可指向 `roi_config.json`、`templates\my_product\roi.json`，默认为 `auto` 自动查找，设为 `none` 关闭掩膜。
 
-训练输出 `teacher_final.pth`, `student_final.pth`, `autoencoder_final.pth`。
+## 自定义参数
 
----
+模型权重文件、归一化缓存可通过以下参数覆盖默认路径：`--teacher`、`--student`、`--autoencoder`、`--norm-cache`。若模型目录缺少 `norm_params.json`，可通过 `--train-dir` 实时计算：
 
-## 3. EfficientAD 推理 (仅模型推理, 不含 ROI 匹配)
-
-```bash
-cd EfficientAD-main
-
-# 分析单张图片 (需要原图已经裁剪好)
-python inference.py --image ../mydataset/my_product/test/broken/img001.png -o anomaly_map.tiff
-
-# 带阈值判定
-python inference.py --image img.png --threshold 0.1
+```powershell
+python model_tools.py infer --model 12 --input path\to\image.png --train-dir mydataset\my_product\train
 ```
-
-| 参数 | 说明 |
-|------|------|
-| `--image` | 输入图片路径 |
-| `--output-map` | anomaly map 保存路径 (.tiff) |
-| `--threshold` | 判定阈值, 超过 = 异常 |
-| `--train-dir` | 训练集路径, 用于计算归一化参数 |
-| `--norm-cache` | 归一化参数缓存文件 |
-
-首次运行计算归一化参数并缓存, 后续复用。
-
----
-
-## 4. 完整流水线 (`pipeline.py`)
-
-一步到位: **模板匹配定位 ROI → 透视矫正裁剪 → EfficientAD 识别 → 标注输出**
-
-### 单张图片检测
-
-```bash
-cd efficientAD
-python pipeline.py --image "测试图.png" --template my_product
-
-# 带阈值自动判定
-python pipeline.py --image "测试图.png" --template my_product --threshold 0.1
-
-# 保存结果
-python pipeline.py --image "测试图.png" --template my_product -o result.png --threshold 0.1
-```
-
-### 批量检测整个文件夹
-
-```bash
-# 检测 test/good (正常样本)
-python pipeline.py --template my_product --input-dir "mydataset\my_product\test\good" --output-dir "results\good"
-
-# 检测 test/broken (异常样本)
-python pipeline.py --template my_product --input-dir "mydataset\my_product\test\broken" --output-dir "results\broken" --threshold 0.1
-
-# 不指定 output-dir 则自动输出到 <input-dir>/annotated/
-python pipeline.py --template my_product --input-dir "mydataset\my_product\test\broken"
-```
-
-### 确定阈值
-
-先不设 `--threshold` 跑几组正常和异常样本, 观察分数范围, 然后在正常样本最高分和异常样本最低分之间选一个阈值:
-
-```bash
-# 正常样本
-python pipeline.py --template my_product --input-dir "mydataset\my_product\test\good" --output-dir "results\good"
-
-# 异常样本  
-python pipeline.py --template my_product --input-dir "mydataset\my_product\test\broken" --output-dir "results\broken"
-
-# 然后设定阈值批量跑
-python pipeline.py --template my_product --input-dir "mydataset\my_product\test\broken" --output-dir "results\broken_annotated" --threshold 0.15
-```
-
-**输出效果**: 每张原图上绘制 ROI 四边形框 + 绿色 `NORMAL` / 红色 `ANOMALY` 标注 + 异常分数。
-
----
-
-## 5. 特征图对比可视化 (`visualize_features.py`)
-
-直观展示 Teacher 和 Student 在哪些特征通道上产生了差异。
-
-```bash
-cd EfficientAD-main
-
-# 生成对比图
-python visualize_features.py --image "../mydataset/my_product/test/broken/img001.png"
-
-# 指定输出文件 & 展示更多差异通道
-python visualize_features.py --image img.png -o comparison.png --top-k 12
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--image` | 输入图片 |
-| `--output` | 输出 PNG 路径 (默认 feature_comparison.png) |
-| `--top-k` | 展示差异最大的 K 个通道 (默认 8) |
-
-**输出解读**:
-- 第 1 行: 输入原图
-- 第 2 行: Teacher 在差异最大通道上的特征图 — 这是"正确答案"
-- 第 3 行: Student 对应通道的特征图 — 它在尝试模仿
-- 第 4 行: 逐通道差值热力图 — 越亮 = Student 模仿得越差
-- 第 5 行: 融合后的 Anomaly Map (叠在原图 + 纯热力图 + colorbar)
-
-正常图上差异通道分布均匀且暗; 异常图上缺陷区域对应的通道会明显亮起。
-
----
-
-## 常见问题
-
-**Q: 首次运行 pipeline 很慢?**
-A: 首次需要计算归一化参数 (在所有训练图上跑 Teacher/Student/Autoencoder), 结果缓存到 `norm_params.json`, 后续秒级。
-
-**Q: ORB 匹配失败?**
-A: 检查模板图是否包含在输入图中。如果产品摆放严重旋转/缩放, 可调低 `RANSAC_THRESH` (默认 5.0)。如果完全无法匹配, 需重新在相似角度下创建模板。
-
-**Q: GPU 内存不足?**
-A: pipeline.py 同时加载 Teacher + Student + Autoencoder 三个模型到显存。6GB 显存够用, 但要在 `compute_norm_params` 里加了 `torch.cuda.empty_cache()` 清理中间张量。如果还报 OOM, 给 reduce batch 或换 CPU 推理。
-
-**Q: 阈值设为多少?**
-A: 取决于你的数据。建议跑完正常和异常各一批, 用 `pipeline.py` 统计分数分布后选定。典型区间: 正常 0~0.10, 异常 0.15~3+。

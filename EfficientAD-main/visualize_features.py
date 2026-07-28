@@ -67,7 +67,9 @@ def load_norm_params(norm_cache_path):
         return t.cuda() if on_gpu else t
     tm = _t(data['teacher_mean']).view(1, -1, 1, 1)
     ts = _t(data['teacher_std']).view(1, -1, 1, 1)
-    return tm, ts
+    qs = _t(data.get('q_st_start', 0.0))
+    qe = _t(data.get('q_st_end', 1.0))
+    return tm, ts, qs, qe
 
 
 def compute_diff_map(t_out, s_out):
@@ -81,9 +83,9 @@ def visualize(image_path, teacher_path, student_path, output_path, top_k=8,
     teacher, student = load_models(teacher_path, student_path)
     img_bgr, img_rgb, tensor, (h_orig, w_orig) = load_and_preprocess(image_path)
 
-    tm = ts = None
+    tm = ts = qs = qe = None
     if norm_cache_path and os.path.isfile(norm_cache_path):
-        tm, ts = load_norm_params(norm_cache_path)
+        tm, ts, qs, qe = load_norm_params(norm_cache_path)
         print(f"Loaded teacher normalization from {norm_cache_path}")
     else:
         print("WARNING: No norm cache — comparing RAW teacher output with student. "
@@ -92,6 +94,9 @@ def visualize(image_path, teacher_path, student_path, output_path, top_k=8,
     t_out, s_out_t, s_out_ae = extract_features(teacher, student, tensor, tm, ts)
 
     diff_full, diff_map = compute_diff_map(t_out, s_out_t)
+
+    if qs is not None and qe is not None:
+        diff_map = 0.1 * (diff_map - qs) / (qe - qs)
 
     diff_map_np = diff_map[0].cpu().numpy()
     diff_map_resized = cv2.resize(diff_map_np, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
@@ -108,9 +113,9 @@ def visualize(image_path, teacher_path, student_path, output_path, top_k=8,
     ax_input.axis('off')
 
     for i, ch_idx in enumerate(top_indices):
-        t_ch = t_out[0, ch_idx].cpu().numpy()
-        s_ch = s_out_t[0, ch_idx].cpu().numpy()
-        d_ch = diff_full[0, ch_idx].cpu().numpy()
+        t_ch = cv2.resize(t_out[0, ch_idx].cpu().numpy(), (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        s_ch = cv2.resize(s_out_t[0, ch_idx].cpu().numpy(), (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
+        d_ch = cv2.resize(diff_full[0, ch_idx].cpu().numpy(), (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
         diff_val = diff_per_channel[ch_idx]
 
         ax_t = plt.subplot2grid((5, n_cols), (1, i), colspan=1)
@@ -161,19 +166,26 @@ if __name__ == '__main__':
         description='Compare teacher vs student feature maps')
 
     parser.add_argument('--image', required=True, help='Input image')
-    parser.add_argument('--teacher', default=os.path.join(
-        SCRIPT_DIR, 'output/1/trainings/mvtec_ad/my_product/teacher_final.pth'))
-    parser.add_argument('--student', default=os.path.join(
-        SCRIPT_DIR, 'output/1/trainings/mvtec_ad/my_product/student_final.pth'))
+    parser.add_argument('--model', default='1', help='Model dir under output/ (1 or 2 etc.)')
+    parser.add_argument('--teacher', default=None)
+    parser.add_argument('--student', default=None)
     parser.add_argument('--output', '-o', default='feature_comparison.png',
                         help='Output image path')
     parser.add_argument('--top-k', type=int, default=8,
                         help='Show top-K channels with largest difference')
-    parser.add_argument('--norm-cache', default=os.path.join(
-        SCRIPT_DIR, 'output/1/trainings/mvtec_ad/my_product/norm_params.json'),
+    parser.add_argument('--norm-cache', default=None,
                         help='Path to norm_params.json for teacher normalization')
 
     args = parser.parse_args()
+
+    model_dir = os.path.join(SCRIPT_DIR, f'output/{args.model}/trainings/mvtec_ad/my_product')
+    if args.teacher is None:
+        args.teacher = os.path.join(model_dir, 'teacher_final.pth')
+    if args.student is None:
+        args.student = os.path.join(model_dir, 'student_final.pth')
+    if args.norm_cache is None:
+        nc = os.path.join(model_dir, 'norm_params.json')
+        args.norm_cache = nc if os.path.isfile(nc) else None
 
     visualize(args.image, args.teacher, args.student, args.output,
               top_k=args.top_k, norm_cache_path=args.norm_cache)

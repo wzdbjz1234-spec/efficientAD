@@ -1,8 +1,9 @@
 import argparse
-import json
 import os
 import cv2
 import numpy as np
+
+from roi_mask import apply_masks, load_roi_config, save_roi_config, select_mask
 
 ORB_FEATURES = 5000
 RATIO_THRESH = 0.75
@@ -32,12 +33,19 @@ def create_template(template_name, image_path):
         print("Cancelled.")
         return
 
+    cropped = image[int(y):int(y + h), int(x):int(x + w)]
+    print("Select the area to exclude from training. Press C/ESC for no mask.")
+    mask = select_mask(cropped)
+    masks = [] if mask is None else [mask]
+
     tpl_dir = os.path.join(TEMPLATES_DIR, template_name)
     os.makedirs(tpl_dir, exist_ok=True)
     cv2.imwrite(os.path.join(tpl_dir, 'template.png'), image)
-    with open(os.path.join(tpl_dir, 'roi.json'), 'w') as f:
-        json.dump({'roi': [int(x), int(y), int(w), int(h)]}, f, indent=2)
-    print(f"Template '{template_name}' saved. ROI=({x},{y},{w},{h})")
+    save_roi_config(
+        (x, y, w, h), masks, os.path.join(tpl_dir, 'roi.json'))
+    print(
+        f"Template '{template_name}' saved. ROI=({x},{y},{w},{h}), "
+        f"training masks={len(masks)}")
 
 
 def list_templates():
@@ -88,8 +96,8 @@ def crop_roi(image_input, template_name):
         print(f"Error: template image not found for '{template_name}'")
         return None
 
-    with open(os.path.join(tpl_dir, 'roi.json')) as f:
-        rx, ry, rw, rh = json.load(f)['roi']
+    roi, masks = load_roi_config(os.path.join(tpl_dir, 'roi.json'))
+    rx, ry, rw, rh = roi
 
     tpl_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
     img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -127,7 +135,7 @@ def crop_roi(image_input, template_name):
     M = cv2.getPerspectiveTransform(dst_corners, dst_rect)
     warped = cv2.warpPerspective(image, M, (out_w, out_h))
 
-    return warped
+    return apply_masks(warped, masks)
 
 
 def batch_crop(input_dir, template_name, output_dir):

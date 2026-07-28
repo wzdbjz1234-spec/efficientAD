@@ -1,3 +1,8 @@
 mydataset/
 data/
 cropped/
+*.png
+ivs/
+learn-efficientad/
+evaluation_model_12_misclassified/
+tests/
