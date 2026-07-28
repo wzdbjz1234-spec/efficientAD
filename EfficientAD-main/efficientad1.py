@@ -60,9 +60,9 @@ default_transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 transform_ae = transforms.RandomChoice([
-    transforms.ColorJitter(brightness=0.2),
-    transforms.ColorJitter(contrast=0.2),
-    transforms.ColorJitter(saturation=0.2)
+    transforms.ColorJitter(brightness=(0, 2.0)),
+    transforms.ColorJitter(saturation=(0, 2.5)),
+    transforms.ColorJitter(hue=(-0.3, 0.3))
 ])
 
 def train_transform(image, valid_input_mask=None):
@@ -317,7 +317,7 @@ def main():
         distance_stae = (ae_output - student_output_ae)**2
         loss_ae = masked_mean(distance_ae, valid_input_mask)
         loss_stae = masked_mean(distance_stae, valid_input_mask)
-        loss_total = loss_st + loss_ae + loss_stae
+        loss_total = loss_st + loss_ae + 2 * loss_stae
 
         optimizer.zero_grad()
         loss_total.backward()
@@ -477,7 +477,7 @@ def predict(image, teacher, student, autoencoder, teacher_mean, teacher_std,
     if output_mask is not None:
         map_st = map_st * output_mask
         map_ae = map_ae * output_mask
-    map_combined = 0.5 * map_st + 0.5 * map_ae
+    map_combined = 0.2 * map_st + 0.8 * map_ae
     return map_combined, map_st, map_ae
 
 @torch.no_grad()
