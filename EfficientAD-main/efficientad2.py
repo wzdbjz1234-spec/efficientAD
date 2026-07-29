@@ -40,6 +40,19 @@ def get_argparse():
                         default='./mvtec_loco_anomaly_detection',
                         help='Downloaded Mvtec LOCO dataset')
     parser.add_argument('-t', '--train_steps', type=int, default=70000)
+    parser.add_argument('--ae-channels', type=int, default=384,
+                        help='Autoencoder output channels (default 384). '
+                             'Lower values reduce Student+AE parameters. '
+                             'Teacher always uses 384 channels.')
+    parser.add_argument('--batch-size', type=int, default=16)
+    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--prefetch-factor', type=int, default=4)
+    parser.add_argument(
+        '--amp', choices=['auto', 'off', 'bf16'], default='auto',
+        help='Mixed precision mode. "auto" enables BF16 on supported CUDA GPUs.')
+    parser.add_argument(
+        '--hard-mining-ratio', type=float, default=0.001,
+        help='Fraction of largest student/teacher errors used by hard mining.')
     parser.add_argument(
         '--mask-config', default='auto',
         help='ROI JSON containing masks. "auto" checks the product directory, '
@@ -50,8 +63,10 @@ def get_argparse():
 # constants
 seed = 42
 on_gpu = torch.cuda.is_available()
-out_channels = 384
+teacher_channels = 384  # Teacher output channels (fixed, pre-trained)
 image_size = 256
+# ae_channels is set from CLI (default 384) — controls Autoencoder output
+# channels.  Student outputs teacher_channels + ae_channels.
 
 # data loading
 default_transform = transforms.Compose([
@@ -159,6 +174,31 @@ def main():
     random.seed(seed)
 
     config = get_argparse()
+    if config.batch_size <= 0:
+        raise ValueError('--batch-size must be greater than zero')
+    if config.num_workers < 0:
+        raise ValueError('--num-workers must be non-negative')
+    if config.prefetch_factor <= 0:
+        raise ValueError('--prefetch-factor must be greater than zero')
+    if not 0 < config.hard_mining_ratio <= 1:
+        raise ValueError('--hard-mining-ratio must be in the interval (0, 1]')
+    if config.ae_channels < 1:
+        raise ValueError('--ae-channels must be greater than zero')
+
+    ae_channels = config.ae_channels
+    student_channels = teacher_channels + ae_channels
+    print(f'Teacher channels: {teacher_channels}  '
+          f'AE channels: {ae_channels}  '
+          f'Student channels: {student_channels}')
+
+    bf16_supported = on_gpu and torch.cuda.is_bf16_supported()
+    if config.amp == 'bf16' and not bf16_supported:
+        raise RuntimeError('BF16 AMP was requested but is not supported')
+    amp_enabled = bf16_supported and config.amp != 'off'
+    if on_gpu:
+        torch.backends.cudnn.benchmark = True
+    print('Training precision: {}'.format(
+        'BF16 AMP' if amp_enabled else 'FP32'))
 
     if not config.weights:
         if config.model_size == 'tiny':
@@ -214,8 +254,18 @@ def main():
         raise Exception('Unknown config.dataset')
 
 
-    train_loader = DataLoader(train_set, batch_size=16, shuffle=True,
-                              num_workers=4, pin_memory=True)
+    loader_kwargs = {
+        'num_workers': config.num_workers,
+        'pin_memory': on_gpu,
+    }
+    if config.num_workers > 0:
+        loader_kwargs.update({
+            'persistent_workers': True,
+            'prefetch_factor': config.prefetch_factor,
+        })
+    train_loader = DataLoader(
+        train_set, batch_size=config.batch_size, shuffle=True,
+        **loader_kwargs)
     train_loader_infinite = InfiniteDataloader(train_loader)
     validation_loader = DataLoader(validation_set, batch_size=1)
 
@@ -231,25 +281,26 @@ def main():
         ])
         penalty_set = ImageFolderWithoutTarget(config.imagenet_train_path,
                                                transform=penalty_transform)
-        penalty_loader = DataLoader(penalty_set, batch_size=16, shuffle=True,
-                                    num_workers=4, pin_memory=True)
+        penalty_loader = DataLoader(
+            penalty_set, batch_size=config.batch_size, shuffle=True,
+            **loader_kwargs)
         penalty_loader_infinite = InfiniteDataloader(penalty_loader)
     else:
         penalty_loader_infinite = itertools.repeat(None)
 
     # create models
     if config.model_size == 'small':
-        teacher = get_pdn_small(out_channels)
-        student = get_pdn_small(2 * out_channels)
-        autoencoder = get_autoencoder(out_channels)
+        teacher = get_pdn_small(teacher_channels)
+        student = get_pdn_small(student_channels)
+        autoencoder = get_autoencoder(ae_channels)
     elif config.model_size == 'medium':
-        teacher = get_pdn_medium(out_channels)
-        student = get_pdn_medium(2 * out_channels)
-        autoencoder = get_autoencoder(out_channels)
+        teacher = get_pdn_medium(teacher_channels)
+        student = get_pdn_medium(student_channels)
+        autoencoder = get_autoencoder(ae_channels)
     elif config.model_size == 'tiny':
-        teacher = get_pdn_small(out_channels)
-        student = get_pdn_tiny(2 * out_channels)
-        autoencoder = get_autoencoder_tiny(out_channels)
+        teacher = get_pdn_small(teacher_channels)
+        student = get_pdn_tiny(student_channels)
+        autoencoder = get_autoencoder_tiny(ae_channels)
     else:
         raise Exception()
     device = torch.device(
@@ -284,7 +335,7 @@ def main():
 
     log_interval = max(1, config.train_steps // 1000)
     ema_alpha = 0.05
-    ema_st = ema_ae = ema_stae = ema_total = None
+    ema_losses = None
 
     tqdm_obj = tqdm(range(config.train_steps))
     for iteration, (image_st, image_ae), image_penalty in zip(
@@ -294,58 +345,71 @@ def main():
             image_ae = image_ae.cuda(non_blocking=True)
             if image_penalty is not None:
                 image_penalty = image_penalty.cuda(non_blocking=True)
-        with torch.no_grad():
-            teacher_output_st = teacher(image_st)
-            teacher_output_st = (teacher_output_st - teacher_mean) / (teacher_std + 1e-6)
-        student_output_st = student(image_st)[:, :out_channels]
-        distance_st = (teacher_output_st - student_output_st) ** 2
-        distance_st_valid = distance_st
-        train_feature_mask = feature_valid_mask(
-            valid_input_mask, distance_st)
-        if train_feature_mask is not None:
-            distance_st_valid = distance_st.masked_select(
-                train_feature_mask.expand_as(distance_st))
-        d_hard = torch.quantile(distance_st_valid, q=0.999)
-        loss_hard = torch.mean(
-            distance_st_valid[distance_st_valid >= d_hard])
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(
+                device_type='cuda', dtype=torch.bfloat16,
+                enabled=amp_enabled):
+            with torch.no_grad():
+                teacher_output_st = teacher(image_st)
+                teacher_output_st = (
+                    teacher_output_st - teacher_mean) / (teacher_std + 1e-6)
+            student_output_st = student(image_st)[:, :teacher_channels]
+            distance_st = (
+                teacher_output_st.float() - student_output_st.float()) ** 2
+            distance_st_valid = distance_st
+            train_feature_mask = feature_valid_mask(
+                valid_input_mask, distance_st)
+            if train_feature_mask is not None:
+                distance_st_valid = distance_st.masked_select(
+                    train_feature_mask.expand_as(distance_st))
 
-        if image_penalty is not None:
-            student_output_penalty = student(image_penalty)[:, :out_channels]
-            loss_penalty = torch.mean(student_output_penalty**2)
-            loss_st = loss_hard + loss_penalty
-        else:
-            loss_st = loss_hard
+            hard_count = max(
+                1, int(distance_st_valid.numel()
+                       * config.hard_mining_ratio))
+            loss_hard = torch.topk(
+                distance_st_valid.flatten(), k=hard_count,
+                sorted=False).values.mean()
 
-        ae_output = autoencoder(image_ae)
-        with torch.no_grad():
-            teacher_output_ae = teacher(image_ae)
-            teacher_output_ae = (teacher_output_ae - teacher_mean) / teacher_std
-        student_output_ae = student(image_ae)[:, out_channels:]
-        distance_ae = (teacher_output_ae - ae_output)**2
-        distance_stae = (ae_output - student_output_ae)**2
-        loss_ae = masked_mean(distance_ae, valid_input_mask)
-        loss_stae = masked_mean(distance_stae, valid_input_mask)
-        loss_total = loss_st + loss_ae + 2 * loss_stae
+            if image_penalty is not None:
+                student_output_penalty = student(
+                    image_penalty)[:, :teacher_channels]
+                loss_penalty = torch.mean(student_output_penalty.float()**2)
+                loss_st = loss_hard + loss_penalty
+            else:
+                loss_st = loss_hard
 
-        optimizer.zero_grad()
+            ae_output = autoencoder(image_ae)
+            with torch.no_grad():
+                teacher_output_ae = teacher(image_ae)
+                teacher_output_ae = (
+                    teacher_output_ae - teacher_mean) / (teacher_std + 1e-6)
+            student_output_ae = student(image_ae)[:, teacher_channels:]
+            distance_ae = (
+                teacher_output_ae.float() - ae_output.float()) ** 2
+            distance_stae = (
+                ae_output.float() - student_output_ae.float()) ** 2
+            loss_ae = masked_mean(distance_ae, valid_input_mask)
+            loss_stae = masked_mean(distance_stae, valid_input_mask)
+            loss_total = loss_st + loss_ae + 2 * loss_stae
+
         loss_total.backward()
         optimizer.step()
         scheduler.step()
 
-        if ema_st is None:
-            ema_st = loss_st.item()
-            ema_ae = loss_ae.item()
-            ema_stae = loss_stae.item()
-            ema_total = loss_total.item()
-        else:
-            ema_st = ema_alpha * loss_st.item() + (1 - ema_alpha) * ema_st
-            ema_ae = ema_alpha * loss_ae.item() + (1 - ema_alpha) * ema_ae
-            ema_stae = ema_alpha * loss_stae.item() + (1 - ema_alpha) * ema_stae
-            ema_total = ema_alpha * loss_total.item() + (1 - ema_alpha) * ema_total
+        current_losses = torch.stack((
+            loss_st.detach(), loss_ae.detach(), loss_stae.detach(),
+            loss_total.detach()))
+        with torch.no_grad():
+            if ema_losses is None:
+                ema_losses = current_losses
+            else:
+                ema_losses.lerp_(current_losses, ema_alpha)
 
         if iteration % log_interval == 0:
+            current_total, ema_st, ema_ae, ema_stae, ema_total = torch.cat((
+                loss_total.detach().reshape(1), ema_losses)).cpu().tolist()
             tqdm_obj.set_description(
-                'L {:.4f}'.format(loss_total.item()))
+                'L {:.4f}'.format(current_total))
             tqdm_obj.set_postfix(
                 EMA='{:.4f}'.format(ema_total),
                 ST='{:.4f}'.format(ema_st),
@@ -353,7 +417,7 @@ def main():
                 SAE='{:.4f}'.format(ema_stae),
                 lr='{:.1e}'.format(scheduler.get_last_lr()[0]))
 
-        if iteration % 1000 == 0:
+        if iteration > 0 and iteration % 1000 == 0:
             torch.save(teacher, os.path.join(train_output_dir,
                                              'teacher_tmp.pth'))
             torch.save(student, os.path.join(train_output_dir,
@@ -472,10 +536,10 @@ def predict(image, teacher, student, autoencoder, teacher_mean, teacher_std,
     teacher_output = (teacher_output - teacher_mean) / teacher_std
     student_output = student(image)
     autoencoder_output = autoencoder(image)
-    map_st = torch.mean((teacher_output - student_output[:, :out_channels])**2,
+    map_st = torch.mean((teacher_output - student_output[:, :teacher_channels])**2,
                         dim=1, keepdim=True)
     map_ae = torch.mean((autoencoder_output -
-                         student_output[:, out_channels:])**2,
+                         student_output[:, teacher_channels:])**2,
                         dim=1, keepdim=True)
     if q_st_start is not None:
         map_st = 0.1 * (map_st - q_st_start) / (q_st_end - q_st_start + 1e-6)
