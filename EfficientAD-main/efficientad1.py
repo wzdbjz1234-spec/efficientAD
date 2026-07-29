@@ -281,8 +281,6 @@ def main():
                                  lr=1e-4, weight_decay=1e-5)
     scheduler = torch.optim.lr_scheduler.StepLR(
         optimizer, step_size=int(0.95 * config.train_steps), gamma=0.1)
-    amp_enabled = on_gpu
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     log_interval = max(1, config.train_steps // 1000)
     ema_alpha = 0.05
@@ -296,56 +294,42 @@ def main():
             image_ae = image_ae.cuda(non_blocking=True)
             if image_penalty is not None:
                 image_penalty = image_penalty.cuda(non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=amp_enabled):
-            # image_st and image_ae contain different augmentations, so their
-            # teacher features cannot be shared. Batch them to avoid two
-            # separate teacher invocations.
-            with torch.no_grad():
-                teacher_output = teacher(
-                    torch.cat((image_st, image_ae), dim=0))
-                teacher_output_st, teacher_output_ae = teacher_output.chunk(
-                    2, dim=0)
-                teacher_output_st = (
-                    teacher_output_st - teacher_mean) / (teacher_std + 1e-6)
-                teacher_output_ae = (
-                    teacher_output_ae - teacher_mean) / (teacher_std + 1e-6)
+        with torch.no_grad():
+            teacher_output_st = teacher(image_st)
+            teacher_output_st = (teacher_output_st - teacher_mean) / (teacher_std + 1e-6)
+        student_output_st = student(image_st)[:, :out_channels]
+        distance_st = (teacher_output_st - student_output_st) ** 2
+        distance_st_valid = distance_st
+        train_feature_mask = feature_valid_mask(
+            valid_input_mask, distance_st)
+        if train_feature_mask is not None:
+            distance_st_valid = distance_st.masked_select(
+                train_feature_mask.expand_as(distance_st))
+        d_hard = torch.quantile(distance_st_valid, q=0.999)
+        loss_hard = torch.mean(
+            distance_st_valid[distance_st_valid >= d_hard])
 
-            student_output_st = student(image_st)[:, :out_channels]
-            # Keep reductions, hard-example mining, and losses in FP32.
-            distance_st = (
-                teacher_output_st.float() - student_output_st.float()) ** 2
-            distance_st_valid = distance_st
-            train_feature_mask = feature_valid_mask(
-                valid_input_mask, distance_st)
-            if train_feature_mask is not None:
-                distance_st_valid = distance_st.masked_select(
-                    train_feature_mask.expand_as(distance_st))
-            d_hard = torch.quantile(distance_st_valid, q=0.999)
-            loss_hard = torch.mean(
-                distance_st_valid[distance_st_valid >= d_hard])
+        if image_penalty is not None:
+            student_output_penalty = student(image_penalty)[:, :out_channels]
+            loss_penalty = torch.mean(student_output_penalty**2)
+            loss_st = loss_hard + loss_penalty
+        else:
+            loss_st = loss_hard
 
-            if image_penalty is not None:
-                student_output_penalty = student(
-                    image_penalty)[:, :out_channels]
-                loss_penalty = torch.mean(student_output_penalty.float()**2)
-                loss_st = loss_hard + loss_penalty
-            else:
-                loss_st = loss_hard
+        ae_output = autoencoder(image_ae)
+        with torch.no_grad():
+            teacher_output_ae = teacher(image_ae)
+            teacher_output_ae = (teacher_output_ae - teacher_mean) / teacher_std
+        student_output_ae = student(image_ae)[:, out_channels:]
+        distance_ae = (teacher_output_ae - ae_output)**2
+        distance_stae = (ae_output - student_output_ae)**2
+        loss_ae = masked_mean(distance_ae, valid_input_mask)
+        loss_stae = masked_mean(distance_stae, valid_input_mask)
+        loss_total = loss_st + loss_ae + 2 * loss_stae
 
-            ae_output = autoencoder(image_ae)
-            student_output_ae = student(image_ae)[:, out_channels:]
-            distance_ae = (
-                teacher_output_ae.float() - ae_output.float()) ** 2
-            distance_stae = (
-                ae_output.float() - student_output_ae.float()) ** 2
-            loss_ae = masked_mean(distance_ae, valid_input_mask)
-            loss_stae = masked_mean(distance_stae, valid_input_mask)
-            loss_total = loss_st + loss_ae + 2 * loss_stae
-
-        scaler.scale(loss_total).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        optimizer.zero_grad()
+        loss_total.backward()
+        optimizer.step()
         scheduler.step()
 
         if ema_st is None:
