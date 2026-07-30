@@ -7,8 +7,8 @@ __pycache__/
 ivs/
 learn-efficientad/
 evaluation_model_12_misclassified/
-EfficientAD-main/output/
-output/
+/output/
+/EfficientAD-main/output/
 
 # Local legacy/one-off scripts superseded by the maintained CLI tools.
 /legacy/
