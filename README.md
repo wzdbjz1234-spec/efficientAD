@@ -75,6 +75,60 @@ python model_tools.py visualize --model 12 --input mydataset\my_product\test\bro
 python model_tools.py visualize --model 12 --input mydataset\my_product\test\broken --output-dir vis\model_12 --limit 5
 ```
 
+## 批量 ROI 推理 (`batch_detector.py`)
+
+输入可以是单张图片或目录。目录模式默认递归处理并保持相对目录结构。
+每张图片只执行一次模型前向，输出：
+
+- `annotated/`：原图 ROI 框、判断类别、得分、阈值、推理时间、总处理时间和权重信息；
+- `heatmaps/`：独立的 AE 差异热力图；
+- `results.csv` 与 `results.json`：图片路径、输出路径、类别、得分、阈值、ST/AE
+  得分权重、模型权重路径、ROI、推理耗时、总耗时和错误信息。
+
+```powershell
+python batch_detector.py `
+  --input path\to\raw_images `
+  --output-dir path\to\batch_results `
+  --model-dir EfficientAD-main\output\verytiny-batch=4 `
+  --roi 1282,284,478,565 `
+  --mask 0,0,80,120 `
+  --mask 300,400,100,100 `
+  --save-roi-config roi-with-masks.json `
+  --threshold 0.014 `
+  --ae-weight 0.025 `
+  --device cuda
+```
+
+`--mask` 的坐标是相对于 ROI 左上角的 `x,y,width,height`，可以重复传入。
+掩码区域不参与模型输入、差异得分和最大值判断；标注图中显示为黄色交叉框，
+独立热力图中保存为黑色。`--save-roi-config` 会保存：
+
+```json
+{
+  "roi": [1282, 284, 478, 565],
+  "masks": [
+    [0, 0, 80, 120],
+    [300, 400, 100, 100]
+  ]
+}
+```
+
+也可以通过 JSON 传入 ROI，并分别覆盖模型产物：
+
+```powershell
+python batch_detector.py `
+  --input path\to\raw_images `
+  --output-dir path\to\batch_results `
+  --roi-config roi-config.json `
+  --student-weight path\to\student_final.pth `
+  --autoencoder-weight path\to\autoencoder_final.pth `
+  --norm-cache path\to\norm_params.json
+```
+
+`--threshold 0.014` 与 `--ae-weight 0.025` 是当前
+`verytiny-batch=4` 权重扫描得到的一组配套尺度。更换模型或 AE 权重后应重新校准阈值。
+若输入已经是裁剪好的 ROI 图片，可省略 `--roi` 和 `--roi-config`。
+
 ### 评测
 
 计算 AUROC、Youden 最优阈值、Accuracy、Precision、Recall、F1、混淆矩阵。误判图片自动生成诊断图。
@@ -163,60 +217,18 @@ python efficientad1.py -d mvtec_ad -s my_product -a ..\mydataset -o output\13 --
 
 `--mask-config` 可指向 `roi_config.json`、`templates\my_product\roi.json`，默认为 `auto` 自动查找，设为 `none` 关闭掩膜。
 
-## 模型评测与权重分析
+## 模型评测
 
-### 综合评测 (evaluate_model14.py)
-
-报告单次推理延迟（CPU/GPU）、分类精度（最优阈值+混淆矩阵），并为所有误判样本生成 ST/STAE 特征热力图诊断。
-
-内部硬编码模型路径和数据集目录，运行前需按实际调整 `MODEL_DIR`、`TEST_DIR` 等变量。
+统一使用 `model_tools.py evaluate`，避免旧实验脚本中硬编码的模型
+14/15/16、数据集和输出目录。历史评测、权重扫描和 tiny/verytiny
+对比脚本仅在本地 `legacy/` 目录保留，该目录不再纳入版本控制。
 
 ```powershell
-# 完整评测（CPU + GPU 基准 + 精度 + 热力图）
-python evaluate_model14.py
-
-# 仅 GPU 基准
-python evaluate_model14.py --gpu-only
-
-# 仅 CPU 基准
-python evaluate_model14.py --cpu-only
-
-# 跳过热力图生成（加速评测）
-python evaluate_model14.py --skip-heatmaps
-
-# 指定设备
-python evaluate_model14.py --device cpu
+python model_tools.py evaluate `
+  --model 12 `
+  --data-dir mydataset\my_product `
+  --output evaluation_model_12.json
 ```
-
-### ST-AE 权重扫描 — 召回率热力图 (sweep_weights.py)
-
-在 ST/AE 双分支权重空间 `[0, 1] × [0, 1]` 做 21×21 网格扫描。对于每个 `(w_st, w_ae)` 组合，按 95% 特异度确定阈值，计算 broken 样本召回率，绘制多模型并排热力图。
-
-```powershell
-python sweep_weights.py
-```
-
-输出图片和 JSON 结果保存在 `weight_sweep_results/`。
-
-### ST-AE 权重扫描 — FPR/FNR/Accuracy 热力图 (sweep_fpr_fnr.py)
-
-41×41 网格扫描 ST/AE 权重组合。对每个组合搜索最优阈值，记录 FPR（假阳性率）、FNR（假阴性率）和 Accuracy，生成 3 模型 × 3 指标的九宫格热力图。
-
-```powershell
-python sweep_fpr_fnr.py
-```
-
-同样输出到 `weight_sweep_results/`。
-
-### 模型体积与速度对比 (bench_tiny.py)
-
-对比 tiny / small / medium 三种模型变体的参数量和 CPU 单张推理耗时（均值、中位数、FPS）。
-
-```powershell
-python bench_tiny.py
-```
-
-tiny 变体将 student 和 autoencoder 内部通道数减半，teacher 复用预训练权重不变。
 
 ## 自定义参数
 
