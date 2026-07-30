@@ -51,9 +51,33 @@ def select_fixed_roi_and_masks(reference_path):
         return None, []
 
     cropped = crop_fixed_roi(image, roi)
-    print('Select the area to exclude from training. Press C/ESC for no mask.')
-    mask = select_mask(cropped)
-    return roi, [] if mask is None else [mask]
+    masks = select_multiple_masks(cropped)
+    return roi, masks
+
+
+def select_multiple_masks(cropped_image, selector=select_mask):
+    """Interactively select zero or more masks inside a cropped ROI."""
+    masks = []
+    preview = cropped_image
+
+    while True:
+        mask_number = len(masks) + 1
+        print(
+            f'Select training mask {mask_number}. '
+            'Press ENTER/SPACE to add it, or C/ESC to finish.')
+        mask = selector(preview)
+        if mask is None:
+            break
+
+        masks.append(mask)
+        preview = apply_masks(cropped_image, masks)
+        print(
+            f'Added training mask {mask_number}: '
+            f'x={mask[0]}, y={mask[1]}, '
+            f'width={mask[2]}, height={mask[3]}')
+
+    print(f'Finished selecting masks: {len(masks)} region(s).')
+    return masks
 
 
 def crop_fixed_roi(image, roi, masks=None):

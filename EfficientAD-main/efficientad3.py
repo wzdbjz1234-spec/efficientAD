@@ -385,7 +385,7 @@ def main():
                     teacher_output_ae - teacher_mean) / (teacher_std + 1e-6)
             student_output_ae = student(image_ae)[:, teacher_channels:]
             distance_ae = (
-                teacher_output_ae.float() - ae_output.float()) ** 2
+                teacher_output_ae[:, :ae_channels].float() - ae_output.float()) ** 2
             distance_stae = (
                 ae_output.float() - student_output_ae.float()) ** 2
             loss_ae = masked_mean(distance_ae, valid_input_mask)

@@ -1,8 +1,13 @@
 mydataset/
 data/
 cropped/
+__pycache__/
+*.py[cod]
 *.png
 ivs/
 learn-efficientad/
 evaluation_model_12_misclassified/
-tests/
+EfficientAD-main/output/
+
+# Local legacy/one-off scripts superseded by the maintained CLI tools.
+/legacy/
