@@ -31,6 +31,7 @@ class _FakeDetector:
         *,
         draw_heatmap=True,
         heatmap_alpha=0.45,
+        heatmap_max=None,
     ):
         height, width = image.shape[:2]
         anomaly_map = np.full((height, width), 0.25, dtype=np.float32)
@@ -51,9 +52,18 @@ class _FakeDetector:
         return result, annotated
 
     @staticmethod
-    def colorize_heatmap(anomaly_map):
+    def colorize_heatmap(anomaly_map, *, heatmap_max=None):
         gray = np.clip(anomaly_map * 255, 0, 255).astype(np.uint8)
         return cv2.applyColorMap(gray, cv2.COLORMAP_JET)
+
+
+class _NormalDetector(_FakeDetector):
+    def detect_and_annotate(self, image, **kwargs):
+        result, annotated = super().detect_and_annotate(image, **kwargs)
+        result.is_anomaly = False
+        result.label = "NORMAL"
+        result.score = 0.05
+        return result, annotated
 
 
 def _write_test_image(path: Path):
@@ -66,6 +76,18 @@ def _write_test_image(path: Path):
 
 
 class BatchDetectorTests(unittest.TestCase):
+    @staticmethod
+    def _artifact_resolver(
+        model_dir: Path,
+        model_product: str | None = None,
+    ) -> EfficientADDetector:
+        detector = EfficientADDetector.__new__(EfficientADDetector)
+        detector.model_dir = model_dir
+        detector.dataset = "mvtec_ad"
+        detector.model_product = model_product
+        detector.product = model_product
+        return detector
+
     def test_processes_directory_and_preserves_relative_structure(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -102,6 +124,14 @@ class BatchDetectorTests(unittest.TestCase):
                     / "b_heatmap.png"
                 ).is_file()
             )
+            self.assertTrue(
+                (
+                    output_dir
+                    / "anomaly_heatmaps"
+                    / "nested"
+                    / "b_heatmap.png"
+                ).is_file()
+            )
 
             with (output_dir / "results.json").open(encoding="utf-8") as handle:
                 report = json.load(handle)
@@ -114,6 +144,11 @@ class BatchDetectorTests(unittest.TestCase):
             self.assertEqual(
                 report["records"][0]["inference_time_ms"],
                 3.5,
+            )
+            self.assertTrue(
+                Path(
+                    report["records"][0]["anomaly_heatmap_path"]
+                ).is_file()
             )
 
             discovered = _discover_images(
@@ -142,6 +177,34 @@ class BatchDetectorTests(unittest.TestCase):
             failed = next(record for record in summary.records if record.error)
             self.assertEqual(Path(failed.input_path), bad_path.resolve())
             self.assertIn("could not decode", failed.error)
+
+    def test_normal_heatmap_is_not_saved_in_anomaly_folder(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / "normal.png"
+            output_dir = root / "output"
+            _write_test_image(input_path)
+
+            summary = BatchDetector(_NormalDetector()).process(
+                input_path,
+                output_dir,
+            )
+
+            self.assertEqual(summary.normal_count, 1)
+            self.assertTrue(
+                (output_dir / "heatmaps" / "normal_heatmap.png").is_file()
+            )
+            self.assertFalse(
+                (
+                    output_dir
+                    / "anomaly_heatmaps"
+                    / "normal_heatmap.png"
+                ).exists()
+            )
+            self.assertEqual(
+                summary.records[0].anomaly_heatmap_path,
+                "",
+            )
 
     def test_roi_parser_requires_four_positive_size_values(self):
         self.assertEqual(_parse_roi("10,20,30,40"), (10, 20, 30, 40))
@@ -179,9 +242,69 @@ class BatchDetectorTests(unittest.TestCase):
             [[10, 20, 30, 40], [50, 60, 70, 80]],
         )
 
+    def test_model_product_cli_name_and_legacy_alias(self):
+        common = ["--input", "images", "--output-dir", "results"]
+        new_args = build_parser().parse_args(
+            [*common, "--model-product", "new_name"]
+        )
+        legacy_args = build_parser().parse_args(
+            [*common, "--product", "legacy_name"]
+        )
+        self.assertEqual(new_args.model_product, "new_name")
+        self.assertEqual(legacy_args.model_product, "legacy_name")
+
+    def test_single_model_product_is_discovered_automatically(self):
+        with tempfile.TemporaryDirectory() as temp:
+            model_dir = Path(temp)
+            artifacts = (
+                model_dir / "trainings" / "mvtec_ad" / "trained_product"
+            )
+            artifacts.mkdir(parents=True)
+            (artifacts / "student_final.pth").touch()
+            detector = self._artifact_resolver(model_dir)
+
+            self.assertEqual(detector._resolve_artifacts_dir(), artifacts)
+            self.assertEqual(detector.model_product, "trained_product")
+
+    def test_multiple_model_products_require_explicit_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            model_dir = Path(temp)
+            dataset_dir = model_dir / "trainings" / "mvtec_ad"
+            for product in ("product_a", "product_b"):
+                artifacts = dataset_dir / product
+                artifacts.mkdir(parents=True)
+                (artifacts / "student_final.pth").touch()
+            detector = self._artifact_resolver(model_dir)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Multiple model products.*product_a, product_b",
+            ):
+                detector._resolve_artifacts_dir()
+
+    def test_explicit_model_product_reports_available_products(self):
+        with tempfile.TemporaryDirectory() as temp:
+            model_dir = Path(temp)
+            artifacts = (
+                model_dir / "trainings" / "mvtec_ad" / "actual_product"
+            )
+            artifacts.mkdir(parents=True)
+            (artifacts / "student_final.pth").touch()
+            detector = self._artifact_resolver(
+                model_dir,
+                model_product="missing_product",
+            )
+
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "Available model products: actual_product",
+            ):
+                detector._resolve_artifacts_dir()
+
     def test_mask_is_excluded_from_output_heatmap(self):
         detector = EfficientADDetector.__new__(EfficientADDetector)
         detector.device = torch.device("cpu")
+        detector.threshold = 1.0
         detector.masks = [(10, 5, 20, 15)]
         roi = (100, 200, 60, 40)
         detector.valid_input_mask = detector._build_valid_input_mask(
@@ -198,6 +321,36 @@ class BatchDetectorTests(unittest.TestCase):
         heatmap = detector.colorize_heatmap(anomaly_map)
         self.assertTrue(np.all(heatmap[5:20, 10:30] == 0))
         self.assertGreater(int(heatmap[30, 40].sum()), 0)
+
+    def test_heatmaps_use_one_absolute_scale_across_images(self):
+        detector = EfficientADDetector.__new__(EfficientADDetector)
+        detector.threshold = 1.0
+        detector.valid_input_mask = None
+
+        low_score_map = np.full((4, 4), 0.1, dtype=np.float32)
+        threshold_map = np.full((4, 4), 1.0, dtype=np.float32)
+        low_heatmap = detector.colorize_heatmap(low_score_map)
+        threshold_heatmap = detector.colorize_heatmap(threshold_map)
+
+        self.assertLess(
+            int(low_heatmap[0, 0, 2]),
+            int(threshold_heatmap[0, 0, 2]),
+        )
+        self.assertGreater(
+            int(low_heatmap[0, 0, 0]),
+            int(threshold_heatmap[0, 0, 0]),
+        )
+
+    def test_heatmap_max_cli_option(self):
+        args = build_parser().parse_args(
+            [
+                "--input", "input",
+                "--output-dir", "output",
+                "--model-dir", "model",
+                "--heatmap-max", "0.02",
+            ]
+        )
+        self.assertEqual(args.heatmap_max, 0.02)
 
     def test_mask_outside_roi_is_rejected(self):
         detector = EfficientADDetector.__new__(EfficientADDetector)

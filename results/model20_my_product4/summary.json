@@ -1,0 +1,55 @@
+{
+  "model": "output/20 (trainings/mvtec_ad/my_product4)",
+  "dataset": "C:\\projects\\efficientAD\\mydataset\\my_product4\\test",
+  "threshold_source": "Youden J from ROC curve",
+  "decision_threshold": 0.19394230842590332,
+  "metrics": {
+    "sample_count": 238,
+    "normal_count": 102,
+    "anomaly_count": 136,
+    "auroc": 0.9783016147635524,
+    "best_threshold_youden": 0.19394230842590332,
+    "decision_threshold": 0.19394230842590332,
+    "threshold_source": "youden",
+    "true_positive_rate": 0.9632352941176471,
+    "false_positive_rate": 0.06862745098039216,
+    "accuracy": 0.9495798319327731,
+    "precision": 0.9492753623188406,
+    "recall": 0.9632352941176471,
+    "f1": 0.9562043795620438,
+    "confusion_matrix": {
+      "tn": 95,
+      "fp": 7,
+      "fn": 5,
+      "tp": 131
+    }
+  },
+  "timing_ms": {
+    "count": 238,
+    "total_ms": 11281.17670211941,
+    "mean_ms": 47.39990210974542,
+    "median_ms": 47.06350015476346,
+    "std_ms": 1.5594662035363183,
+    "min_ms": 45.61539995484054,
+    "max_ms": 60.25810004211962,
+    "fps": 21.097089983112014
+  },
+  "misclassified_count": 12,
+  "misclassified_dir": "C:\\projects\\efficientAD\\results\\model20_my_product4\\misclassified",
+  "false_positive": [
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0222.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0254.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0260.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0293.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0308.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0309.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0315.png"
+  ],
+  "false_negative": [
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0081.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0120.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0184.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0185.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0287.png"
+  ]
+}

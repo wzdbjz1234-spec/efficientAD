@@ -236,6 +236,11 @@ def _result_path(input_path: Path, image_path: Path, output_dir: Path) -> Path:
 
 
 def _evaluate(args: argparse.Namespace) -> int:
+    if args.train_dir is None:
+        data_dir = Path(args.data_dir)
+        candidate = data_dir / "train" / args.normal_class
+        if candidate.is_dir():
+            args.train_dir = str(candidate)
     predictor = _predictor(args)
     result = evaluate_dataset(
         predictor,

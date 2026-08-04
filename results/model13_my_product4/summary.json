@@ -1,0 +1,48 @@
+{
+  "model": "EfficientAD-main/output/13 (trainings/mvtec_ad/my_product4)",
+  "dataset": "mydataset/my_product4/test",
+  "roi": "roi_config4.json -> (1349, 248, 390, 484); 数据集图片已按该ROI裁剪(390x484), 检测时无需再裁",
+  "threshold_source": "Youden J from ROC curve",
+  "decision_threshold": 0.007144,
+  "ae_weight": 0.025,
+  "metrics": {
+    "sample_count": 238,
+    "normal_count": 102,
+    "anomaly_count": 136,
+    "auroc": 0.9502,
+    "accuracy": 0.9286,
+    "precision": 0.9917,
+    "recall": 0.8824,
+    "f1": 0.9339,
+    "confusion_matrix": {
+      "tn": 101,
+      "fp": 1,
+      "fn": 17,
+      "tp": 120
+    }
+  },
+  "misclassified_count": 18,
+  "misclassified_dir": "results/model13_my_product4/misclassified",
+  "false_positive": [
+    "mydataset/my_product4/test/good/003K8_0315.png"
+  ],
+  "false_negative": [
+    "mydataset/my_product4/test/broken/001K8_0066.png",
+    "mydataset/my_product4/test/broken/001K8_0071.png",
+    "mydataset/my_product4/test/broken/001K8_0081.png",
+    "mydataset/my_product4/test/broken/001K8_0082.png",
+    "mydataset/my_product4/test/broken/001K8_0094.png",
+    "mydataset/my_product4/test/broken/001K8_0105.png",
+    "mydataset/my_product4/test/broken/001K8_0106.png",
+    "mydataset/my_product4/test/broken/001K8_0120.png",
+    "mydataset/my_product4/test/broken/001K8_0184.png",
+    "mydataset/my_product4/test/broken/001K8_0185.png",
+    "mydataset/my_product4/test/broken/001K8_0248.png",
+    "mydataset/my_product4/test/broken/001K8_0252.png",
+    "mydataset/my_product4/test/broken/001K8_0287.png",
+    "mydataset/my_product4/test/broken/001K8_0293.png",
+    "mydataset/my_product4/test/broken/001K8_0294.png",
+    "mydataset/my_product4/test/broken/001K8_0297.png",
+    "mydataset/my_product4/test/broken/001K8_0306.png"
+  ]
+}

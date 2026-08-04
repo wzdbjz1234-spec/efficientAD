@@ -13,8 +13,11 @@ import json
 import os
 import random
 import shutil
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from tqdm import tqdm
-from common import get_autoencoder, get_autoencoder_tiny, get_pdn_small, get_pdn_medium, get_pdn_tiny, ImageFolderWithoutTarget, ImageFolderWithPath, InfiniteDataloader
+from common import get_pdn_small, get_pdn_tiny, get_autoencoder_tiny, ImageFolderWithoutTarget, ImageFolderWithPath, InfiniteDataloader
 from sklearn.metrics import roc_auc_score
 
 def get_argparse():
@@ -25,9 +28,7 @@ def get_argparse():
                         help='One of 15 sub-datasets of Mvtec AD or 5' +
                              'sub-datasets of Mvtec LOCO')
     parser.add_argument('-o', '--output_dir', default='output/1')
-    parser.add_argument('-m', '--model_size', default='small',
-                        choices=['small', 'medium', 'tiny'])
-    parser.add_argument('-w', '--weights', default='')
+    parser.add_argument('-w', '--weights', default='models/teacher_small.pth')
     parser.add_argument('-i', '--imagenet_train_path',
                         default='none',
                         help='Set to "none" to disable ImageNet' +
@@ -168,6 +169,27 @@ def masked_mean(value, valid_input_mask):
         return torch.mean(value)
     return torch.mean(value.masked_select(mask.expand_as(value)))
 
+
+def save_loss_curve(loss_history, output_path):
+    if not loss_history['iteration']:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    iterations = loss_history['iteration']
+    ax.plot(iterations, loss_history['total'], label='Total loss', linewidth=2)
+    ax.plot(iterations, loss_history['st'], label='Student/Teacher loss')
+    ax.plot(iterations, loss_history['ae'], label='Autoencoder loss')
+    ax.plot(iterations, loss_history['stae'], label='Student/AE loss')
+    ax.set_xlabel('Training iteration')
+    ax.set_ylabel('Loss (EMA)')
+    ax.set_title('Training Loss Curves')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def main():
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -199,12 +221,6 @@ def main():
         torch.backends.cudnn.benchmark = True
     print('Training precision: {}'.format(
         'BF16 AMP' if amp_enabled else 'FP32'))
-
-    if not config.weights:
-        if config.model_size == 'tiny':
-            config.weights = 'models/teacher_small.pth'
-        else:
-            config.weights = f'models/teacher_{config.model_size}.pth'
 
     if config.dataset == 'mvtec_ad':
         dataset_path = config.mvtec_ad_path
@@ -289,20 +305,9 @@ def main():
         penalty_loader_infinite = itertools.repeat(None)
 
     # create models
-    if config.model_size == 'small':
-        teacher = get_pdn_small(teacher_channels)
-        student = get_pdn_small(student_channels)
-        autoencoder = get_autoencoder(ae_channels)
-    elif config.model_size == 'medium':
-        teacher = get_pdn_medium(teacher_channels)
-        student = get_pdn_medium(student_channels)
-        autoencoder = get_autoencoder(ae_channels)
-    elif config.model_size == 'tiny':
-        teacher = get_pdn_small(teacher_channels)
-        student = get_pdn_tiny(student_channels)
-        autoencoder = get_autoencoder_tiny(ae_channels)
-    else:
-        raise Exception()
+    teacher = get_pdn_small(teacher_channels)
+    student = get_pdn_tiny(student_channels)
+    autoencoder = get_autoencoder_tiny(ae_channels)
     device = torch.device(
     'cuda' if torch.cuda.is_available() else 'cpu'
     )
@@ -336,6 +341,14 @@ def main():
     log_interval = max(1, config.train_steps // 1000)
     ema_alpha = 0.05
     ema_losses = None
+    loss_history = {
+        'iteration': [],
+        'st': [],
+        'ae': [],
+        'stae': [],
+        'total': [],
+    }
+    loss_curve_path = os.path.join(train_output_dir, 'loss_curve.png')
 
     tqdm_obj = tqdm(range(config.train_steps))
     for iteration, (image_st, image_ae), image_penalty in zip(
@@ -408,6 +421,11 @@ def main():
         if iteration % log_interval == 0:
             current_total, ema_st, ema_ae, ema_stae, ema_total = torch.cat((
                 loss_total.detach().reshape(1), ema_losses)).cpu().tolist()
+            loss_history['iteration'].append(iteration)
+            loss_history['st'].append(ema_st)
+            loss_history['ae'].append(ema_ae)
+            loss_history['stae'].append(ema_stae)
+            loss_history['total'].append(ema_total)
             tqdm_obj.set_description(
                 'L {:.4f}'.format(current_total))
             tqdm_obj.set_postfix(
@@ -424,6 +442,7 @@ def main():
                                              'student_tmp.pth'))
             torch.save(autoencoder, os.path.join(train_output_dir,
                                                  'autoencoder_tmp.pth'))
+            save_loss_curve(loss_history, loss_curve_path)
 
         if iteration % 10000 == 0 and iteration > 0:
             # run intermediate evaluation
@@ -463,6 +482,8 @@ def main():
     torch.save(student, os.path.join(train_output_dir, 'student_final.pth'))
     torch.save(autoencoder, os.path.join(train_output_dir,
                                          'autoencoder_final.pth'))
+    save_loss_curve(loss_history, loss_curve_path)
+    print(f'Loss curve saved to {loss_curve_path}')
     if mask_config_path is not None and valid_input_mask is not None:
         saved_mask_config = os.path.join(train_output_dir, 'mask_config.json')
         if os.path.abspath(mask_config_path) != os.path.abspath(saved_mask_config):
