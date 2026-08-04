@@ -82,6 +82,7 @@ python model_tools.py visualize --model 12 --input mydataset\my_product\test\bro
 
 - `annotated/`：原图 ROI 框、判断类别、得分、阈值、推理时间、总处理时间和权重信息；
 - `heatmaps/`：独立的 AE 差异热力图；
+- `anomaly_heatmaps/`：仅包含判定为异常的零件热力图，便于集中复核；
 - `results.csv` 与 `results.json`：图片路径、输出路径、类别、得分、阈值、ST/AE
   得分权重、模型权重路径、ROI、推理耗时、总耗时和错误信息。
 

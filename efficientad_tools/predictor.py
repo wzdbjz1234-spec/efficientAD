@@ -67,9 +67,15 @@ class NormalizationParams:
     q_ae_end: torch.Tensor
 
     @classmethod
-    def load(cls, path: str | Path, device: torch.device) -> "NormalizationParams":
+    def load(
+        cls, path: str | Path, device: torch.device
+    ) -> "NormalizationParams | None":
         with Path(path).open(encoding="utf-8") as handle:
             data = json.load(handle)
+
+        required = ("teacher_mean", "teacher_std", "q_st_start", "q_st_end", "q_ae_start", "q_ae_end")
+        if any(key not in data for key in required):
+            return None
 
         def tensor(value: Any) -> torch.Tensor:
             return torch.as_tensor(value, dtype=torch.float32, device=device)
@@ -183,25 +189,27 @@ class EfficientADPredictor:
             artifacts.model_dir / "mask_config.json", resolved_device
         )
 
+        normalization = None
         if artifacts.norm_params.is_file():
             normalization = NormalizationParams.load(
                 artifacts.norm_params, resolved_device
             )
-        elif train_dir is not None:
-            normalization = _compute_normalization(
-                teacher,
-                student,
-                autoencoder,
-                Path(train_dir),
-                resolved_device,
-                valid_input_mask,
-            )
-            normalization.save(artifacts.norm_params)
-        else:
-            raise FileNotFoundError(
-                f"Normalization cache not found: {artifacts.norm_params}. "
-                "Pass train_dir to compute it."
-            )
+        if normalization is None:
+            if train_dir is not None:
+                normalization = _compute_normalization(
+                    teacher,
+                    student,
+                    autoencoder,
+                    Path(train_dir),
+                    resolved_device,
+                    valid_input_mask,
+                )
+                normalization.save(artifacts.norm_params)
+            else:
+                raise FileNotFoundError(
+                    f"Normalization cache not found: {artifacts.norm_params}. "
+                    "Pass train_dir to compute it."
+                )
 
         return cls(
             artifacts=artifacts,
@@ -325,7 +333,7 @@ def _normalize_map(
 ) -> torch.Tensor:
     denominator = end - start
     if torch.isclose(denominator, torch.zeros_like(denominator)):
-        raise ValueError("Invalid normalization parameters: quantile range is zero")
+        return torch.zeros_like(value)
     return 0.1 * (value - start) / denominator
 
 

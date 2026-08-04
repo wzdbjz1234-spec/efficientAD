@@ -84,6 +84,7 @@ class BatchDetectionRecord:
     input_path: str
     annotated_path: str = ""
     heatmap_path: str = ""
+    anomaly_heatmap_path: str = ""
     label: str = "ERROR"
     is_anomaly: Optional[bool] = None
     score: Optional[float] = None
@@ -148,6 +149,9 @@ class EfficientADDetector:
     threshold : anomaly score decision threshold.
     train_dir : path to training images (only needed once for norm_params).
     device : 'auto', 'cuda', or 'cpu'.
+    model_product : optional product directory used only to locate model
+                    artifacts below trainings/<dataset>/.
+    product : deprecated Python API alias for model_product.
     """
 
     def __init__(
@@ -162,7 +166,8 @@ class EfficientADDetector:
         train_dir: Optional[str | Path] = None,
         device: str = "auto",
         dataset: str = "mvtec_ad",
-        product: str = "my_product",
+        model_product: Optional[str] = None,
+        product: Optional[str] = None,
         student_weight: Optional[str | Path] = None,
         autoencoder_weight: Optional[str | Path] = None,
         norm_cache: Optional[str | Path] = None,
@@ -174,7 +179,14 @@ class EfficientADDetector:
             raise ValueError("ae_weight must be non-negative")
         self.roi = roi
         self.dataset = dataset
-        self.product = product
+        if model_product and product and model_product != product:
+            raise ValueError(
+                "model_product and deprecated product alias disagree: "
+                f"{model_product!r} != {product!r}"
+            )
+        self.model_product = model_product or product
+        # Keep the old public attribute available for existing callers.
+        self.product = self.model_product
         self._student_weight_override = student_weight
         self._autoencoder_weight_override = autoencoder_weight
         self._norm_cache_override = norm_cache
@@ -315,6 +327,7 @@ class EfficientADDetector:
         *,
         draw_heatmap: bool = True,
         heatmap_alpha: float = 0.45,
+        heatmap_max: Optional[float] = None,
     ) -> tuple[DetectionResult, np.ndarray]:
         """Run one inference and return both its result and annotated image."""
         result = self.detect(image)
@@ -323,6 +336,7 @@ class EfficientADDetector:
             result,
             draw_heatmap=draw_heatmap,
             heatmap_alpha=heatmap_alpha,
+            heatmap_max=heatmap_max,
         )
         return result, annotated
 
@@ -332,6 +346,7 @@ class EfficientADDetector:
         *,
         draw_heatmap: bool = True,
         heatmap_alpha: float = 0.45,
+        heatmap_max: Optional[float] = None,
     ) -> np.ndarray:
         """
         Detect and annotate the image.
@@ -347,6 +362,7 @@ class EfficientADDetector:
             result,
             draw_heatmap=draw_heatmap,
             heatmap_alpha=heatmap_alpha,
+            heatmap_max=heatmap_max,
         )
 
     def annotate(
@@ -356,6 +372,7 @@ class EfficientADDetector:
         *,
         draw_heatmap: bool = True,
         heatmap_alpha: float = 0.45,
+        heatmap_max: Optional[float] = None,
     ) -> np.ndarray:
         """Draw a previously computed result without running inference again."""
         if not 0 <= heatmap_alpha <= 1:
@@ -371,8 +388,8 @@ class EfficientADDetector:
         # ── Heatmap overlay ──
         if draw_heatmap and result.anomaly_map is not None:
             amap = result.anomaly_map
-            low, high = float(amap.min()), float(max(amap.max(), 1e-12))
-            normalized = (amap - low) / max(high - low, 1e-12)
+            scale_max = result.threshold if heatmap_max is None else heatmap_max
+            normalized = self._normalize_heatmap(amap, scale_max)
             heatmap = cv2.applyColorMap(
                 np.clip(normalized * 255, 0, 255).astype(np.uint8),
                 cv2.COLORMAP_JET,
@@ -401,9 +418,14 @@ class EfficientADDetector:
             )
             cv2.line(output, (left, top), (right, bottom), (0, 255, 255), 1)
             cv2.line(output, (right, top), (left, bottom), (0, 255, 255), 1)
+            mask_text_y = max(
+                top + 16,
+                min(bottom - 4, top + 26),
+            )
             cv2.putText(
-                output, f"MASK {index}", (left + 4, min(bottom, top + 18)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1,
+                output, f"MASK {index}", (left + 6, mask_text_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 255), 2,
+                cv2.LINE_AA,
             )
 
         # ── Info panel ──
@@ -422,32 +444,49 @@ class EfficientADDetector:
         )
 
         # Background bar at top
-        bar_h = min(92, h)
+        bar_h = min(142, h)
         overlay = output.copy()
         cv2.rectangle(overlay, (0, 0), (w, bar_h), (30, 30, 30), -1)
         cv2.addWeighted(overlay, 0.75, output, 0.25, 0, output)
 
-        cv2.putText(output, label_text, (12, 32),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-        cv2.putText(output, score_text, (12, 56),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
-        cv2.putText(output, time_text, (12, 76),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
-        cv2.putText(output, weight_text, (12, 90),
-                     cv2.FONT_HERSHEY_SIMPLEX, 0.36, (180, 180, 180), 1)
+        cv2.putText(
+            output, label_text, (16, 42),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3, cv2.LINE_AA,
+        )
+        cv2.putText(
+            output, score_text, (16, 76),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            output, time_text, (16, 108),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.62, (210, 210, 210), 2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            output, weight_text, (16, 134),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.52, (190, 190, 190), 1,
+            cv2.LINE_AA,
+        )
 
         # ── ROI label ──
-        cv2.putText(output, f"ROI({rx},{ry},{rw}x{rh})",
-                     (rx, ry - 8), cv2.FONT_HERSHEY_SIMPLEX,
-                     0.45, (0, 255, 0), 1)
+        cv2.putText(
+            output, f"ROI({rx},{ry},{rw}x{rh})",
+            (rx, max(22, ry - 10)), cv2.FONT_HERSHEY_SIMPLEX,
+            0.65, (0, 255, 0), 2, cv2.LINE_AA,
+        )
 
         return output
 
-    def colorize_heatmap(self, anomaly_map: np.ndarray) -> np.ndarray:
-        """Convert a numerical difference map to a JET BGR heatmap."""
-        low = float(np.min(anomaly_map))
-        high = float(np.max(anomaly_map))
-        normalized = (anomaly_map - low) / max(high - low, 1e-12)
+    def colorize_heatmap(
+        self,
+        anomaly_map: np.ndarray,
+        *,
+        heatmap_max: Optional[float] = None,
+    ) -> np.ndarray:
+        """Convert an anomaly map using a fixed, comparable JET color scale."""
+        scale_max = self.threshold if heatmap_max is None else heatmap_max
+        normalized = self._normalize_heatmap(anomaly_map, scale_max)
         heatmap = cv2.applyColorMap(
             np.clip(normalized * 255, 0, 255).astype(np.uint8),
             cv2.COLORMAP_JET,
@@ -457,6 +496,17 @@ class EfficientADDetector:
         ).astype(bool)
         heatmap[~valid] = 0
         return heatmap
+
+    @staticmethod
+    def _normalize_heatmap(
+        anomaly_map: np.ndarray,
+        heatmap_max: float,
+    ) -> np.ndarray:
+        """Map absolute anomaly scores from 0..heatmap_max into 0..1."""
+        if not np.isfinite(heatmap_max) or heatmap_max <= 0:
+            raise ValueError("heatmap_max must be a positive finite number")
+        values = np.asarray(anomaly_map, dtype=np.float32)
+        return np.clip(values / float(heatmap_max), 0.0, 1.0)
 
     def output_valid_mask(self, height: int, width: int) -> np.ndarray:
         """Return a boolean mask resized to an output ROI shape."""
@@ -558,10 +608,58 @@ class EfficientADDetector:
     def _resolve_artifacts_dir(self) -> Path:
         if (self.model_dir / "student_final.pth").is_file():
             return self.model_dir
-        nested = (
-            self.model_dir / "trainings" / self.dataset / self.product
+
+        dataset_dir = self.model_dir / "trainings" / self.dataset
+        if self.model_product:
+            selected = dataset_dir / self.model_product
+            if selected.is_dir():
+                return selected
+            available = self._discover_model_products(dataset_dir)
+            available_text = ", ".join(path.name for path in available)
+            suffix = (
+                f" Available model products: {available_text}."
+                if available else ""
+            )
+            raise FileNotFoundError(
+                f"Model product {self.model_product!r} not found under "
+                f"{dataset_dir}.{suffix}"
+            )
+
+        available = self._discover_model_products(dataset_dir)
+        if len(available) == 1:
+            selected = available[0]
+            self.model_product = selected.name
+            self.product = self.model_product
+            print(
+                f"[Detector] Auto-selected model product: "
+                f"{self.model_product}"
+            )
+            return selected
+        if not available:
+            raise FileNotFoundError(
+                f"No model product containing student_final.pth found under "
+                f"{dataset_dir}. Point --model-dir at an artifact directory "
+                f"or pass --model-product."
+            )
+
+        names = ", ".join(path.name for path in available)
+        raise ValueError(
+            f"Multiple model products found under {dataset_dir}: {names}. "
+            f"Pass --model-product to select one."
         )
-        return nested
+
+    @staticmethod
+    def _discover_model_products(dataset_dir: Path) -> list[Path]:
+        if not dataset_dir.is_dir():
+            return []
+        return sorted(
+            (
+                path for path in dataset_dir.iterdir()
+                if path.is_dir()
+                and (path / "student_final.pth").is_file()
+            ),
+            key=lambda path: path.name,
+        )
 
     @staticmethod
     def _resolve_override(
@@ -674,6 +772,7 @@ class BatchDetector:
         draw_heatmap: bool = True,
         save_heatmap: bool = True,
         heatmap_alpha: float = 0.45,
+        heatmap_max: Optional[float] = None,
         fail_fast: bool = False,
     ) -> BatchSummary:
         """Process all supported images and write annotated outputs and reports."""
@@ -710,6 +809,12 @@ class BatchDetector:
                 / relative.parent
                 / f"{relative.stem}_heatmap.png"
             )
+            anomaly_heatmap_path = (
+                output_root
+                / "anomaly_heatmaps"
+                / relative.parent
+                / f"{relative.stem}_heatmap.png"
+            )
 
             try:
                 image = _read_image(image_path)
@@ -717,13 +822,26 @@ class BatchDetector:
                     image,
                     draw_heatmap=draw_heatmap,
                     heatmap_alpha=heatmap_alpha,
+                    heatmap_max=heatmap_max,
                 )
                 _write_image(annotated_path, annotated)
                 saved_heatmap = ""
+                saved_anomaly_heatmap = ""
                 if save_heatmap:
-                    heatmap = self.detector.colorize_heatmap(result.anomaly_map)
+                    scale_max = (
+                        result.threshold
+                        if heatmap_max is None
+                        else heatmap_max
+                    )
+                    heatmap = self.detector.colorize_heatmap(
+                        result.anomaly_map,
+                        heatmap_max=scale_max,
+                    )
                     _write_image(heatmap_path, heatmap)
                     saved_heatmap = str(heatmap_path)
+                    if result.is_anomaly:
+                        _write_image(anomaly_heatmap_path, heatmap)
+                        saved_anomaly_heatmap = str(anomaly_heatmap_path)
 
                 rx, ry, rw, rh = result.roi
                 weights = self.detector.weight_paths
@@ -731,6 +849,7 @@ class BatchDetector:
                     input_path=str(image_path),
                     annotated_path=str(annotated_path),
                     heatmap_path=saved_heatmap,
+                    anomaly_heatmap_path=saved_anomaly_heatmap,
                     label=result.label,
                     is_anomaly=result.is_anomaly,
                     score=result.score,
@@ -924,7 +1043,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR),
                         help="Model output directory")
     parser.add_argument("--dataset", default="mvtec_ad")
-    parser.add_argument("--product", default="my_product")
+    parser.add_argument(
+        "--model-product",
+        "--product",
+        dest="model_product",
+        default=None,
+        help=(
+            "Product directory containing model artifacts. Usually omitted "
+            "when --model-dir contains exactly one trained product; "
+            "--product remains as a compatibility alias."
+        ),
+    )
     parser.add_argument("--student-weight", default=None,
                         help="Override student_final.pth")
     parser.add_argument("--autoencoder-weight", default=None,
@@ -968,6 +1097,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto",
                         choices=["auto", "cpu", "cuda"])
     parser.add_argument("--heatmap-alpha", type=float, default=0.45)
+    parser.add_argument(
+        "--heatmap-max",
+        type=float,
+        default=None,
+        help=(
+            "Absolute anomaly-map value rendered as the hottest color "
+            "(default: the decision threshold)"
+        ),
+    )
     parser.add_argument("--non-recursive", action="store_true",
                         help="Only process images directly inside input")
     parser.add_argument("--no-overlay", action="store_true",
@@ -984,6 +1122,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
     if not 0 <= args.heatmap_alpha <= 1:
         parser.error("--heatmap-alpha must be between 0 and 1")
+    if args.heatmap_max is not None and (
+        not np.isfinite(args.heatmap_max) or args.heatmap_max <= 0
+    ):
+        parser.error("--heatmap-max must be a positive finite number")
 
     try:
         detector = EfficientADDetector(
@@ -996,7 +1138,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             train_dir=args.train_dir,
             device=args.device,
             dataset=args.dataset,
-            product=args.product,
+            model_product=args.model_product,
             student_weight=args.student_weight,
             autoencoder_weight=args.autoencoder_weight,
             norm_cache=args.norm_cache,
@@ -1013,6 +1155,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             draw_heatmap=not args.no_overlay,
             save_heatmap=not args.no_heatmap_file,
             heatmap_alpha=args.heatmap_alpha,
+            heatmap_max=args.heatmap_max,
             fail_fast=args.fail_fast,
         )
     except (FileNotFoundError, ValueError, RuntimeError) as error:

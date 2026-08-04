@@ -1,0 +1,51 @@
+{
+  "model": "output/21 (trainings/mvtec_ad/my_product4)",
+  "dataset": "C:\\projects\\efficientAD\\mydataset\\my_product4\\test",
+  "threshold_source": "Youden J from ROC curve",
+  "decision_threshold": 0.19611431658267975,
+  "metrics": {
+    "sample_count": 238,
+    "normal_count": 102,
+    "anomaly_count": 136,
+    "auroc": 0.985726643598616,
+    "best_threshold_youden": 0.19611431658267975,
+    "decision_threshold": 0.19611431658267975,
+    "threshold_source": "youden",
+    "true_positive_rate": 0.9779411764705882,
+    "false_positive_rate": 0.049019607843137254,
+    "accuracy": 0.9663865546218487,
+    "precision": 0.9637681159420289,
+    "recall": 0.9779411764705882,
+    "f1": 0.9708029197080292,
+    "confusion_matrix": {
+      "tn": 97,
+      "fp": 5,
+      "fn": 3,
+      "tp": 133
+    }
+  },
+  "timing_ms": {
+    "count": 238,
+    "total_ms": 11089.316898956895,
+    "mean_ms": 46.59376848301216,
+    "median_ms": 46.58295004628599,
+    "std_ms": 0.9191650482816063,
+    "min_ms": 45.05560011602938,
+    "max_ms": 56.10270006582141,
+    "fps": 21.462097455469706
+  },
+  "misclassified_count": 8,
+  "misclassified_dir": "C:\\projects\\efficientAD\\results\\model21_my_product4\\misclassified",
+  "false_positive": [
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0254.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0260.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0308.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0309.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\good\\003K8_0315.png"
+  ],
+  "false_negative": [
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0072.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0094.png",
+    "C:\\projects\\efficientAD\\mydataset\\my_product4\\test\\broken\\001K8_0287.png"
+  ]
+}
