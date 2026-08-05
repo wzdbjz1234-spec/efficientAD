@@ -12,3 +12,5 @@ evaluation_model_12_misclassified/
 
 # Local legacy/one-off scripts superseded by the maintained CLI tools.
 /legacy/
+/results/
+/result/

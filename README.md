@@ -207,6 +207,45 @@ python pipeline.py --template my_product --model 12 --image path\to\raw.png --ou
 python pipeline.py --template my_product --model 12 --input-dir raw_images --output-dir results --threshold 0.15
 ```
 
+## 双ROI推理流水线 (dual_detector.py)
+
+对整幅原始图像同时裁剪两个 ROI 并分别用两个模型检测（teacher-free，只跑
+Student + Autoencoder，分数与含 Teacher 时完全一致），在原图上叠加热力图、
+框出 ROI 并标记类别/得分/阈值。ROI 坐标写死在代码中：
+
+| ROI | 坐标 (x,y,w,h) | 模型 | 默认阈值 |
+|-----|---------------|------|---------|
+| ROI-30 (右侧) | `1418,564,173,196` | 模型30 (mydataset/111) | `0.2` |
+| ROI-31 (左侧) | `150,543,156,155` | 模型31 (mydataset/222) | `0.912657` |
+
+```powershell
+# 单图 / 批量（默认 batch=16，阈值可用 --threshold-30/--threshold-31 覆盖）
+python dual_detector.py --input path\to\raw.png --output-dir results\dual
+python dual_detector.py --input mydataset\my_product_raw\test --output-dir results\dual
+
+# 指定推理设备（默认 auto；可选 cpu / cuda）
+python dual_detector.py --input raw_images --output-dir results\dual --device cuda
+python dual_detector.py --input raw_images --output-dir results\dual --device cpu
+
+# 只保存误判图（按输入路径中的 good/broken 目录判定真实类别，无法判定的进 unknown/）
+python dual_detector.py --input raw_images --output-dir results\dual --save misclassified
+
+# 自定义阈值与批次大小
+python dual_detector.py --input raw_images --output-dir results\dual --batch-size 32 --threshold-30 0.2 --threshold-31 0.9
+
+# 输入为目录时默认递归处理；仅处理第一层加 --non-recursive
+python dual_detector.py --input raw_images --output-dir results\dual --non-recursive
+```
+
+`--save` 未指定时会在交互式终端询问；非交互环境默认保存全部。
+输出目录下生成 `annotated/`（或 `misclassified/` + `unknown/`）叠加图、
+`results.csv` 与 `results.json`。`results.json` 顶部记录本次运行的
+`device`（cpu/cuda）与 `avg_inference_ms`/`min_inference_ms`/
+`max_inference_ms` 汇总；`records` 中每条记录含每张图片的总耗时
+`inference_ms` 以及各 ROI 的耗时（如 `ROI-30_ms`）。模型目录缺少
+`norm_params.json` 时需先用 `model_tools.py infer --train-dir` 生成
+（首次运行会自动计算并缓存）。
+
 ## 训练
 
 数据按 MVTec AD 格式组织后，在 `EfficientAD-main` 下执行：
